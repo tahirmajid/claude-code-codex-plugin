@@ -95,10 +95,14 @@ Precedence for sandbox, approvals and effort: prompt header line, then role pres
 
 - Claude can write a brief to `.handoff/<job>.md` in the job's cwd (see `templates/handoff.md`). A role job is told to read it first and, when it may write, to put its `## Result` there. `.handoff/` is excluded from git through the worktree's own `info/exclude`; `.gitignore` is never touched.
 - Spill: a final message longer than `spillChars` (default 4000) is written in full to `.handoff/<job>.spill.md`; the answer carries its first 1,500 characters and the path.
-- Result: a role job's `## Result` has four fixed fields: Status, Files changed, Commands run (with output tails), Open questions. The check is warn-only and a case-insensitive substring match: the answer gets a warning naming any field label that does not appear anywhere in it. Nothing is refused.
+- Result: a role job's `## Result` has four fixed fields: Status, Files changed, Commands run (with output tails), Open questions. The check is warn-only: the final message must hold a `## Result` heading and, inside that section (up to the next `#` or `##` heading), a field line for each label (`Status:`, `**Status:**`, `- Status:` or a `### Status` heading); a label mentioned in prose elsewhere does not count. The answer gets a warning when the heading is missing or naming each missing field. Nothing is refused.
 - Worktree guard: with `requireWorktree` on, a writing spawn in the main checkout (or a non-git directory) is refused. Independently, a writing spawn is refused while another live writing job has the same cwd.
 - Commit audit: at the end of a job the answer carries a warning when a role that may not commit moved HEAD, or any new commit has a `Co-Authored-By` trailer. Nothing is reverted.
 - The plugin never pushes, and role jobs are told never to push or open or merge a pull request.
+
+## Usage skill
+
+The plugin ships `skills/delegate-to-codex/SKILL.md`, loaded automatically with the plugin: when to delegate, which type to pick, writing the `.handoff` brief, reading results and warnings, guardrail refusals, and the fallback when Codex is out of limit or unavailable.
 
 ## Install
 
@@ -106,14 +110,14 @@ At a Claude Code prompt:
 
 ```
 /plugin marketplace add github.com/tahirmajid/claude-code-codex-plugin
-/plugin install codex-delegate@tahirmajid
+/plugin install codex-delegate@codex-delegate
 ```
 
 From a shell:
 
 ```
 claude plugin marketplace add github.com/tahirmajid/claude-code-codex-plugin
-claude plugin install codex-delegate@tahirmajid
+claude plugin install codex-delegate@codex-delegate
 ```
 
 ### Requirements

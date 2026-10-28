@@ -16,8 +16,8 @@ Concrete checks that must pass (commands to run, behaviour to observe).
 What the job must leave alone, even if it looks related.
 
 ## Result
-<!-- Filled in by the job. Keep these four labels. -->
+<!-- Filled in by the job, and repeated in its final message. Keep the heading and the four field lines (as `- Label:`, `**Label:**` or a `### Label` heading); the check ignores mentions elsewhere. -->
 - Status: done | partial | blocked
 - Files changed:
-- Commands run (output tails):
+- Commands run: (with the tail of each output)
 - Open questions:

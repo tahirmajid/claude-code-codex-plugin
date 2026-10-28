@@ -717,7 +717,7 @@ export const rolePreamble = (role: Role, path: string): string => [
   '- Never push, and never open or merge a pull request.',
   role.commit ? '- You may commit in this worktree.' : '- Do not commit; leave all changes uncommitted.',
   `- If ${path} exists, read it first: it is the brief (goal, scope, constraints, acceptance, out of scope).`,
-  `- Finish by writing a "## Result" section${role.sandbox === 'read-only' ? ' in your final message' : ` in ${path} (and your final message)`} with exactly these fields: ${RESULT_FIELDS.join(', ')} (Commands run with the tail of each output).`,
+  `- Finish by writing a "## Result" section${role.sandbox === 'read-only' ? ' in your final message' : ` in ${path} (and your final message)`} as the last section, headed exactly "## Result", with one field line each: ${RESULT_FIELDS.map(f => `"- ${f}:"`).join(', ')} (put the tail of each command's output under Commands run). Mentioning a field in prose elsewhere does not count.`,
   `- Keep the final message to a short summary plus the path ${path}.`,
   '',
   '',
@@ -728,9 +728,25 @@ export const spillHead = (text: string, path: string): string =>
   `${text.slice(0, SPILL_HEAD)}\n\n[Message of ${text.length} chars cut here; full text: ${path}]`
 export const SPILL_HEAD = 1500
 
-/** A one-line warning naming the fields a role job's final message lacks, or '' when none. */
+/** The body of the last `## Result` heading up to the next heading of level 1-2, or null without one. */
+const resultSection = (text: string): string | null => {
+  const heads = [...text.matchAll(/^##[ \t]+Result[ \t]*$/gim)]
+  const head = heads[heads.length - 1]
+  if (!head) return null
+  const body = text.slice(head.index + head[0].length)
+  const next = body.search(/^#{1,2}[ \t]/m)
+  return next < 0 ? body : body.slice(0, next)
+}
+
+/** True when the section has a field line for the label: `Label:`, `**Label:**`, `- Label:` or a `### Label` heading. */
+const hasField = (section: string, label: string): boolean =>
+  new RegExp(`^[ \\t]*(?:(?:[-*][ \\t]+)?(?:\\*\\*)?${label}(?::\\*\\*|\\*\\*:|:)|#{3,6}[ \\t]+${label}[ \\t]*:?[ \\t]*$)`, 'im').test(section)
+
+/** A one-line warning for a role job's final message with no `## Result` section, or one lacking field lines; '' when complete. */
 export function resultWarning(text: string): string {
-  const missing = RESULT_FIELDS.filter(label => !text.toLowerCase().includes(label.toLowerCase()))
+  const section = resultSection(text)
+  if (section === null) return '\n\nWarning: the final message has no "## Result" section.'
+  const missing = RESULT_FIELDS.filter(label => !hasField(section, label))
   return missing.length === 0 ? '' : `\n\nWarning: the result lacks the required field${missing.length === 1 ? '' : 's'} ${missing.join(', ')}.`
 }
 

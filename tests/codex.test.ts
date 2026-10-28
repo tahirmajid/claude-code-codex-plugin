@@ -2,7 +2,7 @@ import type { On, SessionMessage, TurnStepChunk, TurnStepResult } from 'claude-c
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 
-import { agentDescription, agentSpecs, aliasOf, aliasOfType, approvalAnswer, approvalOptions, bridgeTarget, codexVersionError, configDirs, describeAgent, effectiveDefaults, effortFor, listText, MIN_CODEX_VERSION, modelEffortError, modelFor, nodeOptionPreloads, parseHeader, permissionsFor, resultText, roleDefaults, roleOfType, shortCommand, TOOL_SPECS, UPDATE_HINT, withoutPreloads, wrapperAnswer } from '../hooks/model'
+import { resultWarning, agentDescription, agentSpecs, aliasOf, aliasOfType, approvalAnswer, approvalOptions, bridgeTarget, codexVersionError, configDirs, describeAgent, effectiveDefaults, effortFor, listText, MIN_CODEX_VERSION, modelEffortError, modelFor, nodeOptionPreloads, parseHeader, permissionsFor, resultText, roleDefaults, roleOfType, shortCommand, TOOL_SPECS, UPDATE_HINT, withoutPreloads, wrapperAnswer } from '../hooks/model'
 import type { CodexAgent, CodexApprovals } from '../types'
 
 // A fake bridge: the relay's stdout is a queue the test pushes NDJSON into,
@@ -1448,7 +1448,7 @@ test('a role job gets the preamble and a .handoff dir; a raw model type gets nei
   expect(impl).toContain('Never push')
   expect(impl).toContain('You may commit')
   expect(impl).toContain('/work/app/.handoff/a1.md')
-  expect(impl).toContain('Status, Files changed, Commands run, Open questions')
+  for (const field of ['- Status:', '- Files changed:', '- Commands run:', '- Open questions:']) expect(impl).toContain(field)
   expect(impl).toContain('do the thing')
   expect(turnText(fake, 1)).toContain('Do not commit')
   expect(turnText(fake, 2)).not.toContain('Never push')
@@ -1501,6 +1501,19 @@ test('a role job whose result lacks a field gets a warning; a complete one does 
   fake.waitQueue = [completed('turn-2', FULL_RESULT)]
   expect(String((await awaitCall($, 'a2')).result)).toBe(FULL_RESULT)
   done(fake)
+})
+
+test('resultWarning: the fields must be lines inside a ## Result section', () => {
+  const templated = '## Result\n- Status: done\n- Files changed: none\n- Commands run: ls\n- Open questions: none'
+  expect(resultWarning(templated)).toBe('')
+  expect(resultWarning('## Result\n**Status:** done\n**Files changed:** x\n**Commands run:** y\n### Open questions\nnone')).toBe('')
+  // Prose mentions, or fields outside the section, do not count.
+  expect(resultWarning('The status is fine; I changed files, ran commands and have no open questions.')).toContain('no "## Result" section')
+  expect(resultWarning('Status: done\nFiles changed: x\nCommands run: y\nOpen questions: z')).toContain('no "## Result" section')
+  expect(resultWarning('## Result\nAll done, status fine.\n\n## Notes\nStatus: done\nFiles changed: x\nCommands run: y\nOpen questions: z'))
+    .toContain('lacks the required fields Status, Files changed, Commands run, Open questions')
+  // A reviewer with no writes needs the section too.
+  expect(resultWarning('Looks good to me. Status: approved.')).toContain('no "## Result" section')
 })
 
 const HEAD_A = 'a'.repeat(40)

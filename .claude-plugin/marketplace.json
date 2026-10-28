@@ -1,5 +1,5 @@
 {
-  "name": "tahirmajid",
+  "name": "codex-delegate",
   "description": "Codex delegation plugin for Claude Code: roles, guardrails and handoff docs.",
   "owner": { "name": "Tahir Majid" },
   "plugins": [{ "name": "codex-delegate", "source": "./" }]
