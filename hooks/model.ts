@@ -6,6 +6,8 @@
 import type { EngineInterface, ToolSpec } from 'claude-code'
 
 import type { CodexAgent, CodexApprovals, CodexSandbox } from '../types'
+import { ROLES } from './roles'
+import type { Role } from './roles'
 
 export type Settings = {
   codexPath: string
@@ -14,6 +16,14 @@ export type Settings = {
   defaultEffort: string | undefined
   defaultSandbox: CodexSandbox
   defaultApprovals: CodexApprovals
+  /** Hard ceilings on the final resolved value, whatever its source. */
+  maxSandbox: CodexSandbox
+  allowedApprovals: CodexApprovals[]
+  maxConcurrentJobs: number
+  /** A final message longer than this is written in full to .handoff/<job>.spill.md and shown as its head plus the path. */
+  spillChars: number
+  /** Refuse a writing job whose cwd is the main checkout rather than a linked git worktree. */
+  requireWorktree: boolean
 }
 
 export type BridgeEvent =
@@ -30,7 +40,7 @@ export class CodexError extends Error {}
 export const bridgeTarget = (socket: string, endpoint: string): { url: string; socketPath?: string } =>
   /^https?:/.test(socket) ? { url: `${socket}${endpoint}` } : { url: `http://codex${endpoint}`, socketPath: socket }
 
-export const PREFIX = 'mcp__codex__'
+export const PREFIX = 'mcp__codex-delegate__'
 export const SANDBOXES: CodexSandbox[] = ['read-only', 'workspace-write', 'full-access']
 export const APPROVALS: CodexApprovals[] = ['auto', 'ask', 'never', 'yolo']
 export const MAX_AGENTS = 40
@@ -586,21 +596,45 @@ export function configDirs(cwd: string, root: string): string[] {
   }
 }
 
-/** Precedence: prompt header lines > project config > userConfig > built-ins (sandbox and approvals: the manifest defaults; effort: MODEL_EFFORTS). */
+/** Precedence: prompt header lines > role preset > project config > userConfig > built-ins (sandbox and approvals: the manifest defaults; effort: MODEL_EFFORTS). Headers and project config can only tighten a role's preset, never widen it. */
 export const effectiveDefaults = (settings: Settings, project: Partial<Defaults>): Defaults => ({
   effort: project.effort ?? settings.defaultEffort,
   sandbox: project.sandbox ?? settings.defaultSandbox,
   approvals: project.approvals ?? settings.defaultApprovals,
 })
 
-/** The effort a `codex:<alias>` spawn runs with when its prompt sets none. */
+/** The effort a `codex-delegate:<alias>` spawn runs with when its prompt sets none. */
 export const effortFor = (defaults: Defaults, alias: string): string => defaults.effort ?? (MODEL_EFFORTS[alias] as string)
 
-/** The sandbox and approvals a spawn runs with; yolo forces full access. */
+/** Approvals from tightest to loosest: the more it prompts, the tighter. */
+const APPROVALS_LOOSENESS: CodexApprovals[] = ['ask', 'auto', 'never', 'yolo']
+
+/** The sandbox and approvals a spawn runs with; yolo forces full access. A result above the settings' ceiling, or a header looser than its role's preset, is refused, never clamped. */
 export function permissionsFor(
   args: { sandbox?: string; approvals?: string },
   defaults: Defaults,
+  limits: Pick<Settings, 'maxSandbox' | 'allowedApprovals'>,
+  role?: Role,
 ): { sandbox: CodexSandbox; approvals: CodexApprovals } {
+  const resolved = resolvePermissions(args, defaults)
+  if (!limits.allowedApprovals.includes(resolved.approvals)) {
+    throw new CodexError(`approvals ${resolved.approvals} is not allowed by the allowedApprovals setting (${limits.allowedApprovals.join(', ') || 'none'})`)
+  }
+  if (SANDBOXES.indexOf(resolved.sandbox) > SANDBOXES.indexOf(limits.maxSandbox)) {
+    throw new CodexError(`sandbox ${resolved.sandbox} is above the maxSandbox setting (${limits.maxSandbox})`)
+  }
+  if (role && args.sandbox !== undefined && SANDBOXES.indexOf(args.sandbox as CodexSandbox) > SANDBOXES.indexOf(role.sandbox)) {
+    throw new CodexError(`sandbox ${args.sandbox} is above the ${roleName(role)} role's preset (${role.sandbox}); a header can only tighten a role`)
+  }
+  if (role && args.approvals !== undefined && APPROVALS_LOOSENESS.indexOf(args.approvals as CodexApprovals) > APPROVALS_LOOSENESS.indexOf(role.approvals)) {
+    throw new CodexError(`approvals ${args.approvals} is looser than the ${roleName(role)} role's preset (${role.approvals}); a header can only tighten a role`)
+  }
+  return resolved
+}
+
+const roleName = (role: Role): string => Object.keys(ROLES).find(name => ROLES[name] === role) as string
+
+function resolvePermissions(args: { sandbox?: string; approvals?: string }, defaults: Defaults): { sandbox: CodexSandbox; approvals: CodexApprovals } {
   let approvals = (args.approvals ?? defaults.approvals) as CodexApprovals
   if (!APPROVALS.includes(approvals)) throw new CodexError(`approvals must be one of ${APPROVALS.join(', ')}`)
   // A project default of yolo with an explicit narrower sandbox: that sandbox, still no prompts.
@@ -639,12 +673,12 @@ export type MessagingParams = ReturnType<typeof messagingParams>
 // ------------------------------------------------------------ native agent types
 
 /**
- * Each model alias is a native agent type, `codex:<alias>`. Its subagent is a
+ * Each model alias is a native agent type, `codex-delegate:<alias>`. Its subagent is a
  * wrapper: the plugin starts the Codex turn with the spawn's own prompt, and
  * answers every model request of the wrapper's loop itself (turn.step), so no
  * Claude model reads or rewrites the task or the result.
  */
-export const AGENT_PREFIX = 'codex:'
+export const AGENT_PREFIX = 'codex-delegate:'
 export const AWAIT_TOOL = `${PREFIX}codex_await`
 /** The wrapper's Claude model: named because the definition needs one, and never called. */
 export const WRAPPER_MODEL = 'haiku'
@@ -653,28 +687,82 @@ export const HANDBACK_TOOL = 'SubagentHandback'
 
 type AgentSpec = Parameters<EngineInterface['agent']['register']>[0]
 
-/** The alias a `codex:<alias>` agent type names, or undefined for any other type. */
+/** The role a `codex-delegate:<role>` agent type names, or undefined. */
+export const roleOfType = (subagentType: string): Role | undefined => {
+  const name = subagentType.startsWith(AGENT_PREFIX) ? subagentType.slice(AGENT_PREFIX.length) : ''
+  return Object.hasOwn(ROLES, name) ? ROLES[name] : undefined
+}
+
+/** The model alias a `codex-delegate:<alias|role>` agent type runs (a role's preset model), or undefined for any other type. */
 export const aliasOfType = (subagentType: string): string | undefined => {
   if (!subagentType.startsWith(AGENT_PREFIX)) return undefined
   const alias = subagentType.slice(AGENT_PREFIX.length)
-  return alias in MODEL_ALIASES ? alias : undefined
+  return Object.hasOwn(MODEL_ALIASES, alias) ? alias : roleOfType(subagentType)?.model
+}
+
+/** The defaults a role's preset lays over the effective ones; other types keep them. */
+export const roleDefaults = (defaults: Defaults, role: Role | undefined): Defaults =>
+  role ? { ...defaults, sandbox: role.sandbox, approvals: role.approvals } : defaults
+
+/** The fixed field labels of a job's `## Result`. */
+export const RESULT_FIELDS = ['Status', 'Files changed', 'Commands run', 'Open questions'] as const
+
+/** `.handoff/<job>.md` under the job's cwd: the brief Claude writes, and where the job writes its `## Result`. */
+export const handoffPath = (cwd: string, job: string): string => `${cwd.replace(/\/$/, '')}/.handoff/${job}.md`
+
+/** The text prepended to a role job's prompt (not to a raw model type's). */
+export const rolePreamble = (role: Role, path: string): string => [
+  'Working rules for this job:',
+  '- Stay inside this worktree; touch nothing outside it.',
+  '- Never push, and never open or merge a pull request.',
+  role.commit ? '- You may commit in this worktree.' : '- Do not commit; leave all changes uncommitted.',
+  `- If ${path} exists, read it first: it is the brief (goal, scope, constraints, acceptance, out of scope).`,
+  `- Finish by writing a "## Result" section${role.sandbox === 'read-only' ? ' in your final message' : ` in ${path} (and your final message)`} with exactly these fields: ${RESULT_FIELDS.join(', ')} (Commands run with the tail of each output).`,
+  `- Keep the final message to a short summary plus the path ${path}.`,
+  '',
+  '',
+].join('\n')
+
+/** The final message cut to its head, with the line that says where the whole text is. */
+export const spillHead = (text: string, path: string): string =>
+  `${text.slice(0, SPILL_HEAD)}\n\n[Message of ${text.length} chars cut here; full text: ${path}]`
+export const SPILL_HEAD = 1500
+
+/** A one-line warning naming the fields a role job's final message lacks, or '' when none. */
+export function resultWarning(text: string): string {
+  const missing = RESULT_FIELDS.filter(label => !text.toLowerCase().includes(label.toLowerCase()))
+  return missing.length === 0 ? '' : `\n\nWarning: the result lacks the required field${missing.length === 1 ? '' : 's'} ${missing.join(', ')}.`
+}
+
+/**
+ * Warnings for commits made since a job spawned (HEAD moved): `mayCommit` false means the role may not
+ * commit; undefined (a raw model type) skips that check. A Co-Authored-By trailer is flagged by short sha.
+ */
+export function auditWarnings(mayCommit: boolean | undefined, commits: readonly { sha: string; message: string }[]): string {
+  if (commits.length === 0) return ''
+  let out = ''
+  if (mayCommit === false) out += `\n\nWarning: this role may not commit, but HEAD moved (${commits.length} new commit${commits.length === 1 ? '' : 's'}).`
+  const trailers = commits.filter(c => /^co-authored-by:/im.test(c.message)).map(c => c.sha.slice(0, 7))
+  if (trailers.length) out += `\n\nWarning: commit${trailers.length === 1 ? '' : 's'} ${trailers.join(', ')} ${trailers.length === 1 ? 'has' : 'have'} a Co-Authored-By trailer.`
+  return out
 }
 
 /** When to pick each type: the main model reads this first in the agent listing. */
 const WHEN_TO_USE: Record<string, string> = {
   sol: 'Default Codex agent for normal tasks: implementation, debugging, analysis, review, anything needing judgement.',
-  luna: 'For simple mechanical work and searches: find/grep/list, bulk renames, boilerplate, straightforward well-specified edits, data gathering. Cheap and fast; not for tasks needing judgement (use codex:sol).',
-  astra: 'Use ONLY when the user explicitly asks for astra; otherwise use codex:sol.',
-  terra: 'Use ONLY when the user explicitly asks for terra; otherwise use codex:sol.',
+  luna: 'For simple mechanical work and searches: find/grep/list, bulk renames, boilerplate, straightforward well-specified edits, data gathering. Cheap and fast; not for tasks needing judgement (use codex-delegate:sol).',
+  astra: 'Use ONLY when the user explicitly asks for astra; otherwise use codex-delegate:sol.',
+  terra: 'Use ONLY when the user explicitly asks for terra; otherwise use codex-delegate:sol.',
 }
 
 const effortsOf = (alias: string): string => (alias === 'luna' ? 'low|medium|high|xhigh|max' : 'low|medium|high|xhigh|max|ultra')
 
-/** The listing line the main model reads for `codex:<alias>`; `defaults` are the effective ones at session start. */
-export function agentDescription(alias: string, defaults: Defaults): string {
+/** The listing line the main model reads for `codex-delegate:<alias>`; `defaults` are the effective ones at session start. */
+export function agentDescription(name: string, defaults: Defaults): string {
+  const alias = ROLES[name]?.model ?? name
   const family = alias.charAt(0).toUpperCase() + alias.slice(1)
   return [
-    `${WHEN_TO_USE[alias]} OpenAI Codex on the newest ${family} model, effort ${effortFor(defaults, alias)}.`,
+    `${ROLES[name]?.whenToUse ?? WHEN_TO_USE[name]} OpenAI Codex on the newest ${family} model, effort ${effortFor(defaults, alias)}.`,
     'Codex gets your prompt verbatim, sees nothing of this conversation, and its final message is the result. Always runs in the background.',
     'Optional header lines at the top of the prompt, stripped before Codex sees it:',
     `"effort: ${effortsOf(alias)}";`,
@@ -696,9 +784,9 @@ export const WRAPPER_PROMPT = [
 ].join(' ')
 
 export const agentSpecs = (defaults: Defaults): AgentSpec[] =>
-  Object.keys(MODEL_ALIASES).map(alias => ({
-    name: alias,
-    description: agentDescription(alias, defaults),
+  [...Object.keys(MODEL_ALIASES), ...Object.keys(ROLES)].map(name => ({
+    name,
+    description: agentDescription(name, roleDefaults(defaults, ROLES[name])),
     prompt: WRAPPER_PROMPT,
     tools: [AWAIT_TOOL, 'SendMessage', HANDBACK_TOOL],
     model: WRAPPER_MODEL,
@@ -751,7 +839,7 @@ const RECENT_FINISHED_MS = 30 * 60_000
 /** codex_list: active and recently finished session jobs, or all with `all`, newest first (`agents` sorted so). */
 export function listText(agents: readonly CodexAgent[], sessionId: string, now: number, all = false): string {
   const mine = agents.filter(agent => agent.sessionId === sessionId)
-  if (mine.length === 0) return 'No Codex agents in this session. The Agent tool starts one with subagent_type codex:luna, codex:sol, codex:astra or codex:terra.'
+  if (mine.length === 0) return 'No Codex agents in this session. The Agent tool starts one with subagent_type codex-delegate:implementer, reviewer, runner or rescuer, or codex-delegate:luna, sol, astra or terra.'
   const shown = all ? mine : mine.filter(agent => isLive(agent) || agent.turnEndedAt >= now - RECENT_FINISHED_MS)
   const hidden = mine.length - shown.length
   const notice = `${hidden} older finished jobs hidden; codex_list with all: true lists them. codex_result and SendMessage still reach any of them.`

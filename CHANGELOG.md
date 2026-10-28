@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+Fork note: this is the first release of the codex-delegate fork of SSS135/claude-code-codex-plugin; entries below it are upstream history.
+
+- Rename the plugin to `codex-delegate` (agent types `codex-delegate:<name>`, tools `mcp__codex-delegate__*`).
+- Add role agents: implementer, reviewer, runner, rescuer, each with a sandbox, approvals, model and commit preset.
+- Add user ceiling settings: `maxSandbox`, `allowedApprovals`, `spillChars`; a spawn above the ceiling is refused.
+- Default `defaultApprovals` to `ask`; `yolo` needs `allowedApprovals` and `maxSandbox` full-access.
+- Add `maxConcurrentJobs` (default 3).
+- Add `.handoff/<job>.md` briefs (git-excluded via the worktree's `info/exclude`), spill of long final messages to `.handoff/<job>.spill.md`, and a warn-only check for the four `## Result` fields.
+- Add the `requireWorktree` guard and a commit audit (HEAD moved for a no-commit role, `Co-Authored-By` trailers).
+- Fix agent-type and alias lookup through `Object.prototype` names by using `Object.hasOwn`.
+
 ## 0.2.10
 
 - Clarify timing in `codex_list` and `codex_result`: running jobs show their elapsed time; finished jobs show `ran 7m 22s, finished 53m ago` alongside their status. The finish age uses the same `turnEndedAt` as the 30-minute filter. Older records without an end timestamp omit timing.

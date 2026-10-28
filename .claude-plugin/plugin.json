@@ -1,10 +1,10 @@
 {
-  "name": "codex",
-  "version": "0.2.10",
+  "name": "codex-delegate",
+  "version": "0.3.0",
   "author": {
     "name": "SSS135"
   },
-  "description": "Run OpenAI Codex jobs as native background subagents (codex:luna, codex:sol, codex:astra, codex:terra): the native task list, SendMessage, TaskStop and finish notifications, with Codex approval requests as Claude Code dialogs.",
+  "description": "Run OpenAI Codex jobs as native background subagents (codex-delegate:implementer, reviewer, runner, rescuer, and the raw models luna, sol, astra, terra): the native task list, SendMessage, TaskStop and finish notifications, with Codex approval requests as Claude Code dialogs.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "codexPath": {
@@ -49,12 +49,47 @@
       "type": "string",
       "title": "Default approvals",
       "description": "auto: Codex's own reviewer decides on escalations (looser than Claude auto mode); ask: you approve each in a dialog; never: the sandbox alone decides. The full bypass, yolo, is never a user-wide default: only an explicit request or a project's .claude/codex.json sets it.",
-      "default": "auto",
+      "default": "ask",
       "options": [
         "auto",
         "ask",
         "never"
       ]
+    },
+    "maxSandbox": {
+      "type": "string",
+      "title": "Maximum sandbox",
+      "description": "Hard ceiling on the sandbox of every spawn, whatever sets it (role preset, default, project .claude/codex.json, prompt header). A spawn above it is refused, not clamped.",
+      "default": "workspace-write",
+      "options": [
+        "read-only",
+        "workspace-write",
+        "full-access"
+      ]
+    },
+    "allowedApprovals": {
+      "type": "string",
+      "title": "Allowed approvals",
+      "description": "Comma-separated approvals values a spawn may run with, from auto, ask, never, yolo. A spawn resolving to any other is refused. yolo also needs maxSandbox full-access.",
+      "default": "ask,never"
+    },
+    "spillChars": {
+      "type": "number",
+      "title": "Spill threshold (characters)",
+      "description": "A job's final message longer than this is written in full to .handoff/<job>.spill.md in its worktree; the answer carries its first ~1,500 characters and that path.",
+      "default": 4000
+    },
+    "requireWorktree": {
+      "type": "boolean",
+      "title": "Require a linked worktree for writing jobs",
+      "description": "When on, a spawn that may write is refused if its cwd is the main checkout rather than a linked git worktree (a non-git cwd counts as not a worktree). Read-only jobs are never refused.",
+      "default": false
+    },
+    "maxConcurrentJobs": {
+      "type": "number",
+      "title": "Maximum concurrent jobs",
+      "description": "A spawn is refused while this many Codex jobs of the session are running.",
+      "default": 3
     }
   },
   "homepage": "https://github.com/SSS135/claude-code-codex-plugin",

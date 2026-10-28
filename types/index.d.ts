@@ -3,7 +3,7 @@ export type CodexSandbox = 'read-only' | 'workspace-write' | 'full-access'
 export type CodexApprovals = 'ask' | 'auto' | 'never' | 'yolo'
 export type CodexStatus = 'starting' | 'running' | 'idle' | 'interrupted' | 'failed'
 
-/** One Codex job: a Codex thread run under a native `codex:<alias>` subagent, keyed by that subagent's agentId. */
+/** One Codex job: a Codex thread run under a native `codex-delegate:<alias>` subagent, keyed by that subagent's agentId. */
 export type CodexAgent = {
   /** The native subagent's agentId, which SendMessage and TaskStop take. */
   id: string
@@ -16,6 +16,10 @@ export type CodexAgent = {
   sandbox: CodexSandbox
   approvals: CodexApprovals
   cwd: string
+  /** The role the job runs as (implementer, reviewer, runner, rescuer); absent for a raw model type. */
+  role?: string
+  /** HEAD of the job's repo when it spawned; null when cwd is not git or has no commits. Absent on older records. */
+  headAtSpawn?: string | null
   status: CodexStatus
   /** The running turn, null when none runs. */
   currentTurnId: string | null
@@ -46,7 +50,7 @@ export type CodexAgent = {
 
 declare module 'claude-code' {
   interface PluginState {
-    codex: {
+    'codex-delegate': {
       agents: Record<string, CodexAgent>
       /** Survives reloads: names this session's bridge daemon. */
       bridgeKey: string | null

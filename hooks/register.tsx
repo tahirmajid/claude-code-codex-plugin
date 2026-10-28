@@ -1,6 +1,6 @@
 // codex: OpenAI Codex jobs as native background subagents of this Claude session.
 //
-//   Agent({ subagent_type: "codex:<alias>" }) --agent.spawn--> this module starts
+//   Agent({ subagent_type: "codex-delegate:<alias>" }) --agent.spawn--> this module starts
 //   the Codex turn with the spawn's own prompt, keyed by the new agentId; the
 //   subagent's loop is answered by turn.step here (no Claude model runs): it
 //   calls codex_await until the turn ends, then answers the Codex final message.
@@ -33,6 +33,14 @@ import {
   parseHeader,
   parseProjectConfig,
   permissionsFor,
+  roleDefaults,
+  roleOfType,
+  resultWarning,
+  auditWarnings,
+  rolePreamble,
+  handoffPath,
+  spillHead,
+  AGENT_PREFIX,
   PROJECT_CONFIG,
   type BridgeEvent,
   bridgeStopReason,
@@ -83,13 +91,14 @@ import {
   verdictOf,
   wrapperAnswer,
 } from './model'
+import { ROLES } from './roles'
 
 type Engine = EngineInterface
 
 // ------------------------------------------------------------ state
 
-const agentsAtom = atom({ plugin: 'codex', key: 'agents' } as const, {})
-const bridgeKeyAtom = atom({ plugin: 'codex', key: 'bridgeKey' } as const, null)
+const agentsAtom = atom({ plugin: 'codex-delegate', key: 'agents' } as const, {})
+const bridgeKeyAtom = atom({ plugin: 'codex-delegate', key: 'bridgeKey' } as const, null)
 
 const STORE_KEY = 'agents'
 /** The native transcript's row bullet and result mark. */
@@ -163,6 +172,63 @@ async function patchAgent(
   })
   if (written) await afterWrite($, agents, written)
   return written
+}
+
+/**
+ * patchAgent for a change that sets `lastMessage`: a message over spillChars is written in full to
+ * .handoff/<job>.spill.md by the bridge and replaced by its head and the path, before sanitize clips
+ * it. A role job's final message (`final`) also gets the missing-field warning, computed on the full text.
+ */
+async function patchSpilling(
+  $: Engine,
+  id: string,
+  change: (agent: CodexAgent) => Partial<CodexAgent>,
+  final = false,
+): Promise<CodexAgent | undefined> {
+  const agent = (await read($, agentsAtom))[id]
+  const full = agent ? change(agent).lastMessage : undefined
+  if (!agent || !full) return patchAgent($, id, change)
+  const limit = bridgeSettings?.spillChars ?? 0
+  let shown = full
+  if (limit > 0 && full.length > limit) {
+    try {
+      const spilled = await post($, '/handoff/spill', { cwd: agent.cwd, job: id, text: full })
+      shown = spillHead(full, String(spilled.path))
+    } catch (error) {
+      $.ui.log(`codex: spilling ${agent.name}'s message failed: ${errorText(error)}`, { to: 'debug' })
+    }
+  }
+  if (final && agent.role) shown += resultWarning(full)
+  if (final) shown += await commitAudit($, agent)
+  return patchAgent($, id, current => {
+    const changed = change(current)
+    return changed.lastMessage === full ? { ...changed, lastMessage: shown } : changed
+  })
+}
+
+/** HEAD and linked-worktree state of cwd from the bridge; null when the bridge cannot tell. */
+async function gitState($: Engine, cwd: string): Promise<{ head: string | null; linked: boolean } | null> {
+  try {
+    const r = await post($, '/git/head', { cwd })
+    return { head: typeof r.head === 'string' ? r.head : null, linked: r.linked === true }
+  } catch (error) {
+    $.ui.log(`codex: git state of ${cwd} failed: ${errorText(error)}`, { to: 'debug' })
+    return null
+  }
+}
+
+/** Policy warnings for the commits a job made since it spawned; '' when none, not git, or HEAD was not recorded. Warns only. */
+async function commitAudit($: Engine, agent: CodexAgent): Promise<string> {
+  if (!agent.headAtSpawn) return ''
+  try {
+    const now = await gitState($, agent.cwd)
+    if (!now?.head || now.head === agent.headAtSpawn) return ''
+    const listed = (await post($, '/git/commits', { cwd: agent.cwd, since: agent.headAtSpawn })).commits
+    return auditWarnings(agent.role ? ROLES[agent.role]?.commit : undefined, Array.isArray(listed) ? (listed as { sha: string; message: string }[]) : [])
+  } catch (error) {
+    $.ui.log(`codex: commit audit of ${agent.name} failed: ${errorText(error)}`, { to: 'debug' })
+    return ''
+  }
 }
 
 /** Fills $.state from the store after a restart; after a reload $.state is the fresher copy. */
@@ -411,6 +477,8 @@ type JobInput = {
   approvals: CodexApprovals
   cwd: string
   msgKey: string
+  role?: string
+  headAtSpawn?: string | null
 }
 
 /** Starts and names the Codex thread; the turn starts once the subagent's id is known. */
@@ -443,6 +511,8 @@ async function newAgent($: Engine, id: string, threadId: string, input: JobInput
     sandbox: input.sandbox,
     approvals: input.approvals,
     cwd: input.cwd,
+    ...(input.role ? { role: input.role } : {}),
+    headAtSpawn: input.headAtSpawn ?? null,
     status: 'starting',
     currentTurnId: null,
     lastTurnId: null,
@@ -569,12 +639,12 @@ async function settleTurn($: Engine, agent: CodexAgent, answer: WaitAnswer): Pro
   if (answer.status === 'timeout' || answer.status === 'message') return
   const now = await $.clock.now()
   const turn = answer.turn
-  await patchAgent($, agent.id, current => {
+  await patchSpilling($, agent.id, current => {
     if (!isLive(current)) return {}
     if (turn && (current.currentTurnId === null || turn.id === current.currentTurnId)) return afterTurn(current, turn, now)
     // The bridge runs no turn on the thread and its last one is not ours.
     return { status: 'failed', currentTurnId: null, lastTurnStatus: 'failed', error: 'the Codex turn was lost', turnEndedAt: now }
-  })
+  }, true)
 }
 
 /**
@@ -620,8 +690,8 @@ const messagesText = (count: number) => `Codex sent ${count === 1 ? 'a message' 
  * it again, or ends with the result.
  */
 async function awaitJob($: Engine, agentId: string | undefined, signal: AbortSignal): Promise<string> {
-  if (agentId === undefined) throw new CodexError('codex_await serves codex:* agents only')
-  if (!(await read($, agentsAtom))[agentId] && !(await isCodexType($, agentId))) throw new CodexError('codex_await serves codex:* agents only')
+  if (agentId === undefined) throw new CodexError('codex_await serves codex-delegate:* agents only')
+  if (!(await read($, agentsAtom))[agentId] && !(await isCodexType($, agentId))) throw new CodexError('codex_await serves codex-delegate:* agents only')
   await reconcileAgents($)
   const startedAt = await $.clock.now()
   const deadline = startedAt + AWAIT_MS
@@ -643,7 +713,7 @@ async function awaitJob($: Engine, agentId: string | undefined, signal: AbortSig
       // The spawn hook is between the subagent's start and the Codex turn's.
       if (settling >= SETTLE_BUDGET_MS) {
         if (agent) return `${STILL_RUNNING}: its turn is still starting.`
-        throw new CodexError('codex_await serves codex:* agents only, and no Codex job runs under this agent')
+        throw new CodexError('codex_await serves codex-delegate:* agents only, and no Codex job runs under this agent')
       }
       await $.clock.sleep(SETTLE_MS)
       settling += SETTLE_MS
@@ -711,7 +781,7 @@ async function onNotification($: Engine, method: string, params: Record<string, 
       return
     }
     case 'item/completed':
-      await patchAgent($, agent.id, current => itemCompleted(current, params.item as Item))
+      await patchSpilling($, agent.id, current => itemCompleted(current, params.item as Item))
       return
     case 'item/autoApprovalReview/completed': {
       const line = autoReviewDigest(params)
@@ -734,8 +804,8 @@ async function onNotification($: Engine, method: string, params: Record<string, 
       if (!turn) return
       const now = await $.clock.now()
       // A late end of an earlier turn leaves a newer running one alone.
-      await patchAgent($, agent.id, current =>
-        current.currentTurnId === null || current.currentTurnId === turn.id ? afterTurn(current, turn, now) : {},
+      await patchSpilling($, agent.id, current =>
+        current.currentTurnId === null || current.currentTurnId === turn.id ? afterTurn(current, turn, now) : {}, true,
       )
       // Never hold the event loop on the release. A failed turn's thread stays subscribed: Codex may work on.
       if (turn.status !== 'failed') void releaseThread($, params.threadId)
@@ -875,6 +945,11 @@ export const register: Register = (on, options) => {
     defaultEffort: options.defaultEffort === PER_MODEL_EFFORT ? undefined : String(options.defaultEffort),
     defaultSandbox: String(options.defaultSandbox) as CodexSandbox,
     defaultApprovals: String(options.defaultApprovals) as CodexApprovals,
+    maxSandbox: String(options.maxSandbox) as CodexSandbox,
+    allowedApprovals: String(options.allowedApprovals).split(',').map(item => item.trim()).filter(Boolean) as CodexApprovals[],
+    maxConcurrentJobs: Number(options.maxConcurrentJobs),
+    spillChars: Number(options.spillChars),
+    requireWorktree: options.requireWorktree === true || options.requireWorktree === 'true',
   }
   bridgeSettings = settings
 
@@ -895,7 +970,7 @@ export const register: Register = (on, options) => {
 
   // ---------------------------------------------------------- native agents
 
-  // A codex:* spawn: the Codex thread starts before the subagent, so a bad model,
+  // A codex-delegate:* spawn: the Codex thread starts before the subagent, so a bad model,
   // effort or header refuses the Agent call itself; its turn starts with the
   // prompt as given, header lines stripped, once the subagent's id is known.
   on('agent.spawn', async ($, e, next) => {
@@ -903,12 +978,17 @@ export const register: Register = (on, options) => {
     if (alias === undefined) return next(e)
     let input: JobInput
     let body: string
+    let role: ReturnType<typeof roleOfType>
     let threadId: string
     try {
       const header = parseHeader(e.prompt)
       body = header.body
       if (body.trim() === '') return { deny: 'codex: the prompt is empty once its header lines are taken off' }
-      const defaults = effectiveDefaults(settings, await projectConfig($))
+      role = roleOfType(e.subagentType)
+      const defaults = roleDefaults(effectiveDefaults(settings, await projectConfig($)), role)
+      const sessionId = await $.session.id()
+      const live = Object.values(await read($, agentsAtom)).filter(agent => agent.sessionId === sessionId && isLive(agent)).length + spawnsInFlight
+      if (live >= settings.maxConcurrentJobs) return { deny: `codex: ${live} Codex jobs are already running; the maxConcurrentJobs setting allows ${settings.maxConcurrentJobs}` }
       // A bridge that is down starts here again, or the refusal says why it did not; its relay has read `codex --version`.
       await bridgeSocket($)
       const outdated = codexVersionError(codexVersion)
@@ -916,9 +996,19 @@ export const register: Register = (on, options) => {
       const listed = await listModels($)
       const model = modelFor(listed, alias)
       const effort = header.effort ?? effortFor(defaults, alias)
-      const { sandbox, approvals } = permissionsFor(header, defaults)
+      const { sandbox, approvals } = permissionsFor(header, defaults, settings, role)
       const error = modelEffortError(listed, model, effort)
       if (error) return { deny: `codex: ${error}` }
+      const cwd = e.cwd ?? (await $.session.cwd())
+      const git = await gitState($, cwd)
+      // Read-only jobs are never refused by the worktree rules.
+      if (sandbox !== 'read-only') {
+        const other = Object.values(await read($, agentsAtom)).find(agent => isLive(agent) && agent.sandbox !== 'read-only' && agent.cwd === cwd)
+        if (other) return { deny: `codex: ${other.name} (${other.id}) is already a writing job in ${cwd}; give this job its own worktree, or wait for that one to finish` }
+        if (settings.requireWorktree && !git?.linked) {
+          return { deny: `codex: the requireWorktree setting refuses a writing job in ${cwd}, which is not a linked git worktree (git worktree add makes one)` }
+        }
+      }
       input = {
         description: taskLabel(e),
         // Made unique as the job is recorded (putAgent), so two spawns at once never share one.
@@ -927,9 +1017,13 @@ export const register: Register = (on, options) => {
         effort,
         sandbox,
         approvals,
-        cwd: e.cwd ?? (await $.session.cwd()),
+        cwd,
+        headAtSpawn: git?.head ?? null,
         msgKey: crypto.randomUUID().replaceAll('-', ''),
+        ...(role ? { role: e.subagentType.slice(AGENT_PREFIX.length) } : {}),
       }
+      // The job's .handoff dir, excluded from git in its worktree only; a failure here never blocks the job.
+      await post($, '/handoff/init', { cwd: input.cwd }).catch(error => $.ui.log(`codex: .handoff setup failed: ${errorText(error)}`, { to: 'debug' }))
       const thread = await startThread($, input)
       threadId = thread.threadId
       input = { ...input, model: thread.model }
@@ -945,7 +1039,7 @@ export const register: Register = (on, options) => {
       }
       const agent = await putAgent($, await newAgent($, spawned.agentId, threadId, input))
       try {
-        await startTurn($, agent, body)
+        await startTurn($, agent, role ? rolePreamble(role, handoffPath(agent.cwd, agent.id)) + body : body)
       } catch (error) {
         // The subagent runs: it ends at once with this reason as its answer.
         const now = await $.clock.now()

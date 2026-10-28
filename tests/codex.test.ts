@@ -2,8 +2,8 @@ import type { On, SessionMessage, TurnStepChunk, TurnStepResult } from 'claude-c
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 
-import { agentDescription, agentSpecs, aliasOf, approvalAnswer, approvalOptions, bridgeTarget, codexVersionError, configDirs, describeAgent, effectiveDefaults, effortFor, listText, MIN_CODEX_VERSION, modelEffortError, modelFor, nodeOptionPreloads, parseHeader, permissionsFor, resultText, shortCommand, TOOL_SPECS, UPDATE_HINT, withoutPreloads, wrapperAnswer } from '../hooks/model'
-import type { CodexAgent } from '../types'
+import { agentDescription, agentSpecs, aliasOf, aliasOfType, approvalAnswer, approvalOptions, bridgeTarget, codexVersionError, configDirs, describeAgent, effectiveDefaults, effortFor, listText, MIN_CODEX_VERSION, modelEffortError, modelFor, nodeOptionPreloads, parseHeader, permissionsFor, resultText, roleDefaults, roleOfType, shortCommand, TOOL_SPECS, UPDATE_HINT, withoutPreloads, wrapperAnswer } from '../hooks/model'
+import type { CodexAgent, CodexApprovals } from '../types'
 
 // A fake bridge: the relay's stdout is a queue the test pushes NDJSON into,
 // and its HTTP endpoints are answered by an `http.fetch` hook. Beneath the
@@ -62,6 +62,11 @@ type Fake = {
   shown: string[]
   /** What model/list answers: [id, efforts], in any order. */
   models: [string, string[]][]
+  /** Bridge /handoff/* calls, in order. */
+  handoffs: { path: string; body: Record<string, unknown> }[]
+  /** What /git/head answers per cwd (absent: not git), and what /git/commits lists. */
+  git: Record<string, { head: string | null; linked: boolean }>
+  commits: { sha: string; message: string }[]
   clock: MockClock
 }
 
@@ -97,6 +102,7 @@ function fakeBridge(on: On, stored: Record<string, unknown> = {}, files: Record<
     turnCount: 0,
     waitQueue: [],
     waitError: null,
+    handoffs: [],
     registeredAgents: [],
     store: { ...stored },
     disk: JSON.parse(JSON.stringify(disk)),
@@ -106,12 +112,14 @@ function fakeBridge(on: On, stored: Record<string, unknown> = {}, files: Record<
       ['gpt-6-luna', EFFORTS],
       ['gpt-6.1-sol', [...EFFORTS, 'ultra']],
     ],
+    git: {},
+    commits: [],
     clock: mock.clock(on, { now }),
   }
   // The engine beneath the plugin.
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
-  on('tool.register', (_$, e) => ({ value: { tool: `mcp__codex__${e.name}` } }))
+  on('tool.register', (_$, e) => ({ value: { tool: `mcp__codex-delegate__${e.name}` } }))
   on('agent.register', (_$, e) => {
     fake.registeredAgents.push(JSON.parse(JSON.stringify(e)))
     return { value: { agent: `codex:${e.name}` } }
@@ -216,6 +224,12 @@ function fakeBridge(on: On, stored: Record<string, unknown> = {}, files: Record<
         reply = { error: { message: error } }
       } else reply = { result: answer(rpc) }
     }
+    if (path.startsWith('/handoff/')) {
+      fake.handoffs.push({ path, body })
+      if (path === '/handoff/spill') reply = { ok: true, path: `${body.cwd}/.handoff/${body.job}.spill.md` }
+    }
+    if (path === '/git/head') reply = fake.git[String(body.cwd)] ?? { head: null, linked: false }
+    if (path === '/git/commits') reply = { commits: fake.commits }
     if (path === '/reply') fake.replies.push(body)
     if (path === '/wait') {
       fake.waits.push(body)
@@ -268,12 +282,15 @@ async function start($: Engine, fake: Fake, ready: Record<string, unknown> = {})
   fake.wake()
 }
 
+/** The manifest's ceilings, as register builds them. */
+const LIMITS = { maxSandbox: 'workspace-write' as const, allowedApprovals: ['ask', 'never'] as CodexApprovals[], maxConcurrentJobs: 3 }
+
 /** What the Agent tool hands `agent.spawn` for a call. */
 const spawnInput = (prompt: string, extra: Record<string, unknown> = {}) => ({
   tool_use_id: 'toolu_test',
   prompt,
   description: 'Sleep a while',
-  subagentType: 'codex:luna',
+  subagentType: 'codex-delegate:luna',
   provider: { plugin: 'engine', tier: 'core' as const },
   parentModel: 'claude-opus-5-5',
   background: true,
@@ -284,9 +301,11 @@ const spawnInput = (prompt: string, extra: Record<string, unknown> = {}) => ({
 /** SendMessage from the main loop's model. */
 const send = ($: Engine, to: string, text: string) => $.session.send({ to, text, origin: { kind: 'model' } })
 
-/** The Agent tool starting a codex:luna agent, as the engine raises it. */
+/** The Agent tool starting a codex-delegate:luna agent, as the engine raises it. */
 async function spawn($: Engine, fake: Fake, prompt = 'sleep 20', extra: Record<string, unknown> = {}) {
-  const spawned = await $.agent.spawn(spawnInput(prompt, extra))
+  // Later jobs get their own cwd, so the same-cwd writer guard stays out of tests about other things.
+  const cwd = extra.cwd === undefined && fake.spawned.length > 0 ? { cwd: `/work/app-${fake.spawned.length}` } : {}
+  const spawned = await $.agent.spawn(spawnInput(prompt, { ...cwd, ...extra }))
   expect(spawned.deny).toBeUndefined()
   return (await agentsOf(fake))[spawned.agentId as string] as Record<string, unknown>
 }
@@ -302,7 +321,7 @@ async function step($: Engine, agentId: string, index = 0): Promise<{ chunks: Tu
   }
 }
 
-const awaitCall = ($: Engine, agentId: string) => $.tool.call({ tool: 'mcp__codex__codex_await', agentId } as never)
+const awaitCall = ($: Engine, agentId: string) => $.tool.call({ tool: 'mcp__codex-delegate__codex_await', agentId } as never)
 
 /** The JSON arguments a tool step streamed. */
 const inputOf = (chunks: TurnStepChunk[]) =>
@@ -331,9 +350,9 @@ test('configured binaries missing from disk fall back to node and codex on PATH'
 test('registers one native agent type per model alias, run on haiku with codex_await and SendMessage', async ($, on) => {
   const fake = fakeBridge(on, {}, { '/work/.claude/codex.json': JSON.stringify({ effort: 'medium' }) })
   await start($, fake)
-  expect(fake.registeredAgents.map(spec => spec.name)).toEqual(['luna', 'sol', 'astra', 'terra'])
+  expect(fake.registeredAgents.map(spec => spec.name)).toEqual(['luna', 'sol', 'astra', 'terra', 'implementer', 'reviewer', 'runner', 'rescuer'])
   for (const spec of fake.registeredAgents) {
-    expect(spec).toMatchObject({ tools: ['mcp__codex__codex_await', 'SendMessage', 'SubagentHandback'], model: 'haiku', background: true, omitClaudeMd: true })
+    expect(spec).toMatchObject({ tools: ['mcp__codex-delegate__codex_await', 'SendMessage', 'SubagentHandback'], model: 'haiku', background: true, omitClaudeMd: true })
   }
   const luna = String(fake.registeredAgents[0]?.description)
   expect(luna).toContain('the newest Luna model, effort medium.')
@@ -342,7 +361,7 @@ test('registers one native agent type per model alias, run on haiku with codex_a
   done(fake)
 })
 
-test('a codex:* spawn starts the Codex turn with the exact prompt, keyed by the agentId', { timeoutMs: 20_000 }, async ($, on) => {
+test('a codex-delegate:* spawn starts the Codex turn with the exact prompt, keyed by the agentId', { timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on, {}, { [CODEX_DEFAULT]: '', [NODE_DEFAULT]: '' })
   await start($, fake)
   expect(fake.argv[0]).toBe(NODE_DEFAULT)
@@ -351,10 +370,10 @@ test('a codex:* spawn starts the Codex turn with the exact prompt, keyed by the 
 
   const prompt = 'Write unit tests for calc.js\n\n  keep the indentation\n'
   const agent = await spawn($, fake, prompt, { description: 'Write calc tests' })
-  expect(fake.spawned[0]).toMatchObject({ subagentType: 'codex:luna', prompt, background: true })
+  expect(fake.spawned[0]).toMatchObject({ subagentType: 'codex-delegate:luna', prompt, background: true })
   expect(agent).toMatchObject({ id: 'a1', name: 'Write calc tests', description: 'Write calc tests', model: 'gpt-6-luna', effort: 'max', status: 'running', currentTurnId: 'turn-1', cwd: '/work/app' })
   expect(fake.rpcs.map(rpc => rpc.method)).toEqual(['model/list', 'thread/start', 'thread/name/set', 'turn/start'])
-  expect(fake.rpcs[1]?.params).toMatchObject({ model: 'gpt-6-luna', cwd: '/work/app', sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', ephemeral: false })
+  expect(fake.rpcs[1]?.params).toMatchObject({ model: 'gpt-6-luna', cwd: '/work/app', sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'user', ephemeral: false })
   // The job can message the session: bin/codex-msg as an MCP server, named with the bridge's socket and the job's key.
   const msgKey = String(agent.msgKey)
   expect(msgKey).toMatch(/^[0-9a-f]{32}$/)
@@ -383,7 +402,7 @@ test('a codex:* spawn starts the Codex turn with the exact prompt, keyed by the 
   done(fake)
 })
 
-test('header lines set effort, sandbox and approvals and are stripped; a bad one refuses the spawn', { timeoutMs: 20_000 }, async ($, on) => {
+test('header lines set effort, sandbox and approvals and are stripped; a bad one refuses the spawn', { options: { maxSandbox: 'full-access', allowedApprovals: 'auto,ask,never,yolo' }, timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on)
   await start($, fake)
   await spawn($, fake, 'effort: low\nSandbox: read-only\napprovals: ask\n\nDo X\nthen Y')
@@ -431,8 +450,8 @@ test('the wrapper loop: codex_await while Codex runs, then the Codex final messa
 
   const first = await step($, 'a1')
   expect(first.chunks.map(chunk => chunk.kind)).toEqual(['tool', 'input', 'stop'])
-  expect(first.chunks[0]).toMatchObject({ kind: 'tool', name: 'mcp__codex__codex_await' })
-  expect(first.result).toMatchObject({ toolUses: [{ name: 'mcp__codex__codex_await', input: {} }], stopReason: 'tool_use' })
+  expect(first.chunks[0]).toMatchObject({ kind: 'tool', name: 'mcp__codex-delegate__codex_await' })
+  expect(first.result).toMatchObject({ toolUses: [{ name: 'mcp__codex-delegate__codex_await', input: {} }], stopReason: 'tool_use' })
 
   const final = 'Line one\n\n  exact *markdown*, kept as is\n'
   fake.waitQueue = [{ status: 'timeout' }, { status: 'timeout' }, completed('turn-1', final)]
@@ -480,7 +499,7 @@ test('a failed or lost Codex turn ends the wrapper with the reason', { timeoutMs
   expect(await finalOf($, 'a2')).toBe('Codex failed: the Codex turn did not start: thread busy')
 
   // codex_await serves codex:* agents alone.
-  expect((await $.tool.call({ tool: 'mcp__codex__codex_await' } as never)).deny).toContain('codex:* agents only')
+  expect((await $.tool.call({ tool: 'mcp__codex-delegate__codex_await' } as never)).deny).toContain('codex-delegate:* agents only')
   expect(wrapperAnswer({ status: 'interrupted', error: null } as unknown as CodexAgent)).toBe('Codex turn interrupted.')
   expect(wrapperAnswer({ status: 'idle', lastMessage: '' } as unknown as CodexAgent)).toBe('(Codex finished without a final message.)')
   done(fake)
@@ -510,7 +529,7 @@ test('a codex-msg message returns codex_await early and goes to main as the agen
   expect((await agentsOf(fake)).a1?.digest).toEqual(['message to Claude: Which DB should I use?'])
 
   // Back to waiting; a message sent just before the turn ended goes out ahead of the result.
-  expect((await step($, 'a1', 2)).result.toolUses[0]?.name).toBe('mcp__codex__codex_await')
+  expect((await step($, 'a1', 2)).result.toolUses[0]?.name).toBe('mcp__codex-delegate__codex_await')
   fake.waitQueue = [completed('turn-1', 'RESULT'), { status: 'message', messages: ['late note'] }]
   expect((await awaitCall($, 'a1')).result).toBe('RESULT')
   expect(fake.waits.at(-1)).toMatchObject({ threadId: 'th-1', msgKey: agent.msgKey, timeoutMs: 1 })
@@ -677,21 +696,46 @@ test('an approval asks the person and posts the reply; a dismissed dialog declin
   done(fake)
 })
 
-test('permissions: auto by default, yolo forces full access and refuses a contradicting sandbox', () => {
-  const settings = { codexPath: 'c', nodePath: 'n', defaultEffort: 'high', defaultSandbox: 'workspace-write' as const, defaultApprovals: 'auto' as const }
+test('permissions: ask by default, yolo forces full access and refuses a contradicting sandbox, the ceiling refuses', () => {
+  const settings = { codexPath: 'c', nodePath: 'n', defaultEffort: 'high', defaultSandbox: 'workspace-write' as const, defaultApprovals: 'ask' as const, ...LIMITS }
+  const open = { ...settings, maxSandbox: 'full-access' as const, allowedApprovals: ['auto', 'ask', 'never', 'yolo'] as CodexApprovals[] }
   const defaults = effectiveDefaults(settings, {})
-  expect(defaults).toEqual({ effort: 'high', sandbox: 'workspace-write', approvals: 'auto' })
-  expect(permissionsFor({}, defaults)).toEqual({ sandbox: 'workspace-write', approvals: 'auto' })
-  expect(permissionsFor({ approvals: 'yolo' }, defaults)).toEqual({ sandbox: 'full-access', approvals: 'yolo' })
-  expect(() => permissionsFor({ approvals: 'yolo', sandbox: 'read-only' }, defaults)).toThrow('contradicts')
-  expect(permissionsFor({ sandbox: 'read-only' }, effectiveDefaults(settings, { approvals: 'yolo' }))).toEqual({ sandbox: 'read-only', approvals: 'never' })
-  expect(permissionsFor({}, effectiveDefaults(settings, { approvals: 'yolo' }))).toEqual({ sandbox: 'full-access', approvals: 'yolo' })
-  expect(() => permissionsFor({ approvals: 'sometimes' }, defaults)).toThrow('approvals must be one of')
+  expect(defaults).toEqual({ effort: 'high', sandbox: 'workspace-write', approvals: 'ask' })
+  expect(permissionsFor({}, defaults, settings)).toEqual({ sandbox: 'workspace-write', approvals: 'ask' })
+  expect(permissionsFor({ approvals: 'yolo' }, defaults, open)).toEqual({ sandbox: 'full-access', approvals: 'yolo' })
+  expect(() => permissionsFor({ approvals: 'yolo', sandbox: 'read-only' }, defaults, open)).toThrow('contradicts')
+  expect(permissionsFor({ sandbox: 'read-only' }, effectiveDefaults(settings, { approvals: 'yolo' }), open)).toEqual({ sandbox: 'read-only', approvals: 'never' })
+  expect(permissionsFor({}, effectiveDefaults(settings, { approvals: 'yolo' }), open)).toEqual({ sandbox: 'full-access', approvals: 'yolo' })
+  expect(() => permissionsFor({ approvals: 'sometimes' }, defaults, settings)).toThrow('approvals must be one of')
+  // The ceiling is a hard max on the final value, whatever sets it: refused, never clamped.
+  expect(() => permissionsFor({ sandbox: 'full-access' }, defaults, settings)).toThrow('above the maxSandbox')
+  expect(() => permissionsFor({}, effectiveDefaults(settings, { sandbox: 'full-access' }), settings)).toThrow('above the maxSandbox')
+  expect(() => permissionsFor({ approvals: 'yolo' }, defaults, settings)).toThrow('not allowed by the allowedApprovals')
+  expect(() => permissionsFor({ approvals: 'auto' }, defaults, settings)).toThrow('not allowed by the allowedApprovals')
+  // A header can lower, not exceed.
+  expect(permissionsFor({ sandbox: 'read-only', approvals: 'never' }, defaults, settings)).toEqual({ sandbox: 'read-only', approvals: 'never' })
+  // Role presets are the defaults of their type.
+  for (const [role, sandbox, approvals, model] of [['implementer', 'workspace-write', 'never', 'sol'], ['reviewer', 'read-only', 'never', 'sol'], ['runner', 'workspace-write', 'ask', 'luna'], ['rescuer', 'workspace-write', 'ask', 'sol']] as const) {
+    expect(aliasOfType(`codex-delegate:${role}`)).toBe(model)
+    expect(permissionsFor({}, roleDefaults(defaults, roleOfType(`codex-delegate:${role}`)), settings)).toEqual({ sandbox, approvals })
+  }
+  // Headers only tighten a role's preset: refused, never clamped.
+  const as = (name: string) => roleOfType(`codex-delegate:${name}`)
+  const forRole = (name: string, header: { sandbox?: string; approvals?: string }) => permissionsFor(header, roleDefaults(defaults, as(name)), open, as(name))
+  expect(() => forRole('reviewer', { sandbox: 'workspace-write' })).toThrow('reviewer role')
+  expect(forRole('reviewer', { sandbox: 'read-only' })).toEqual({ sandbox: 'read-only', approvals: 'never' })
+  expect(forRole('implementer', { sandbox: 'read-only' })).toEqual({ sandbox: 'read-only', approvals: 'never' })
+  expect(() => forRole('implementer', { sandbox: 'full-access' })).toThrow('above the implementer role')
+  expect(forRole('implementer', { approvals: 'ask' }).approvals).toBe('ask')
+  expect(() => forRole('runner', { approvals: 'never' })).toThrow('looser than the runner role')
+  expect(permissionsFor({ sandbox: 'workspace-write', approvals: 'ask' }, defaults, settings)).toEqual({ sandbox: 'workspace-write', approvals: 'ask' })
+  expect(aliasOfType('codex-delegate:nobody')).toBeUndefined()
+  expect(aliasOfType('codex-delegate:toString')).toBeUndefined()
   expect(configDirs('/work/app/src', '/work')).toEqual(['/work/app/src', '/work/app', '/work'])
   expect(configDirs('/elsewhere', '/work')).toEqual(['/elsewhere', '/'])
   expect(approvalOptions('item/fileChange/requestApproval', { proposedExecpolicyAmendment: ['x'] })).not.toContain('Allow always')
   expect(approvalAnswer('item/fileChange/requestApproval', {}, { kind: 'always' })).toEqual({ result: { decision: 'acceptForSession' } })
-  expect(agentSpecs(defaults).map(spec => spec.name)).toEqual(['luna', 'sol', 'astra', 'terra'])
+  expect(agentSpecs(defaults).map(spec => spec.name)).toEqual(['luna', 'sol', 'astra', 'terra', 'implementer', 'reviewer', 'runner', 'rescuer'])
 })
 
 test('Windows paths: config dirs split at \\ and end at the drive; commands drop the PowerShell wrapper', () => {
@@ -728,14 +772,14 @@ test("Windows bridge: requests go to the daemon's loopback URL under its secret,
   push(fake, { type: 'ready', socket: 'http://127.0.0.1:5000/s3cret', reattached: false, active: {} })
   const agent = await spawn($, fake, 'x')
   expect(fake.targets.length).toBeGreaterThan(0)
-  for (const target of fake.targets) expect(target).toMatch(/^ http:\/\/127\.0\.0\.1:5000\/s3cret\/(rpc|wait|registry\/(read|write))$/)
+  for (const target of fake.targets) expect(target).toMatch(/^ http:\/\/127\.0\.0\.1:5000\/s3cret\/(rpc|wait|git\/head|handoff\/init|registry\/(read|write))$/)
   const started = fake.rpcs.find(rpc => rpc.method === 'thread/start')?.params as { config: { mcp_servers: Record<string, { args: string[] }> } }
   expect(started.config.mcp_servers.claude_session?.args.slice(1)).toEqual(['http://127.0.0.1:5000/s3cret', String(agent.msgKey)])
   done(fake)
 })
 
 test('the agent listing: sol is the default, luna for searches and easy work, astra and terra only when asked', () => {
-  const defaults = effectiveDefaults({ codexPath: 'c', nodePath: 'n', defaultEffort: undefined, defaultSandbox: 'workspace-write', defaultApprovals: 'auto' }, {})
+  const defaults = effectiveDefaults({ codexPath: 'c', nodePath: 'n', defaultEffort: undefined, defaultSandbox: 'workspace-write', defaultApprovals: 'ask', ...LIMITS }, {})
   expect(agentDescription('sol', defaults)).toContain('Default')
   expect(agentDescription('sol', defaults)).toContain('the newest Sol model, effort high.')
   expect(agentDescription('luna', defaults)).toContain('searches')
@@ -786,13 +830,13 @@ test('a spawn runs the newest listed family model without a pinned-model warning
   ]
   await start($, fake)
   const first = await spawn($, fake, 'x')
-  await spawn($, fake, 'y', { subagentType: 'codex:sol' })
+  await spawn($, fake, 'y', { subagentType: 'codex-delegate:sol' })
   expect(fake.rpcs.filter(rpc => rpc.method === 'thread/start').map(rpc => rpc.params.model)).toEqual(['gpt-7-luna', 'gpt-7-sol'])
   expect(fake.rpcs.filter(rpc => rpc.method === 'turn/start').map(rpc => rpc.params.model)).toEqual(['gpt-7-luna', 'gpt-7-sol'])
   expect(first.model).toBe('gpt-7-luna')
   const warnings = fake.shown.filter(line => line.includes(UPDATE_HINT))
   expect(warnings).toEqual([])
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)).toContain('[gpt-7-luna/max,')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)).toContain('[gpt-7-luna/max,')
   expect(String(fake.registeredAgents[1]?.description)).toContain('the newest Sol model')
   done(fake)
 })
@@ -819,7 +863,7 @@ test('a spawn whose alias has no model of its family on this Codex CLI is refuse
   done(fake)
 })
 
-test('project config: header lines > .claude/codex.json (nearest up to the root) > userConfig', { timeoutMs: 20_000 }, async ($, on) => {
+test('project config: header lines > .claude/codex.json (nearest up to the root) > userConfig', { options: { maxSandbox: 'full-access', allowedApprovals: 'auto,ask,never,yolo' }, timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on, {}, { '/work/.claude/codex.json': JSON.stringify({ effort: 'medium', approvals: 'yolo' }) })
   await start($, fake)
   // Project defaults apply: medium, yolo (so full access).
@@ -832,12 +876,12 @@ test('project config: header lines > .claude/codex.json (nearest up to the root)
   expect(fake.rpcs.filter(rpc => rpc.method === 'turn/start')[1]?.params).toMatchObject({ effort: 'low' })
   // A broken config is reported, not ignored.
   fake.files['/work/.claude/codex.json'] = '{"sandbox": "everything"}'
-  const refused = await $.agent.spawn(spawnInput('z', { subagentType: 'codex:sol' }))
+  const refused = await $.agent.spawn(spawnInput('z', { subagentType: 'codex-delegate:sol' }))
   expect(refused.deny).toContain('sandbox must be one of')
   done(fake)
 })
 
-test('effort: per-model built-ins (luna max, others high) under header > project > userConfig', { timeoutMs: 20_000 }, async ($, on) => {
+test('effort: per-model built-ins (luna max, others high) under header > project > userConfig', { options: { maxConcurrentJobs: 10 }, timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on)
   fake.agentIds.push('a4')
   await start($, fake)
@@ -850,7 +894,7 @@ test('effort: per-model built-ins (luna max, others high) under header > project
   expect(descriptions[3]).toMatch(/^Use ONLY when the user explicitly asks for terra/)
   // No effort set anywhere: each model's own.
   await spawn($, fake, 'x')
-  await spawn($, fake, 'y', { subagentType: 'codex:sol' })
+  await spawn($, fake, 'y', { subagentType: 'codex-delegate:sol' })
   const turns = () => fake.rpcs.filter(rpc => rpc.method === 'turn/start').map(rpc => rpc.params.effort)
   expect(turns()).toEqual(['max', 'high'])
   // A project effort applies to every model; the header still wins.
@@ -869,7 +913,7 @@ test('effort: a userConfig defaultEffort replaces the per-model built-ins, below
   fake.files['/work/.claude/codex.json'] = JSON.stringify({ effort: 'low' })
   await spawn($, fake, 'y')
   expect(fake.rpcs.filter(rpc => rpc.method === 'turn/start').map(rpc => rpc.params.effort)).toEqual(['medium', 'low'])
-  const settings = { codexPath: 'c', nodePath: 'n', defaultEffort: undefined, defaultSandbox: 'workspace-write' as const, defaultApprovals: 'auto' as const }
+  const settings = { codexPath: 'c', nodePath: 'n', defaultEffort: undefined, defaultSandbox: 'workspace-write' as const, defaultApprovals: 'ask' as const, ...LIMITS }
   const builtIn = effectiveDefaults(settings, {})
   expect(['luna', 'sol', 'astra', 'terra'].map(alias => effortFor(builtIn, alias))).toEqual(['max', 'high', 'high', 'high'])
   expect(agentDescription('terra', builtIn)).toContain('the newest Terra model, effort high.')
@@ -911,16 +955,16 @@ const savedAgent = (id: string, extra: Partial<CodexAgent> = {}): CodexAgent => 
 
 test('restart with an empty store restores native jobs from disk across session IDs, then resumes the real Codex thread before delivery', { timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on, {}, {}, { a1: savedAgent('a1'), elsewhere: savedAgent('elsewhere') }, LIST_NOW)
-  fake.agentList.push({ id: 'a1', type: 'codex:sol', name: 'helper' })
+  fake.agentList.push({ id: 'a1', type: 'codex-delegate:sol', name: 'helper' })
   // New relay, older daemon: persistence is served separately from Codex RPCs.
   await start($, fake, { registry: 'http://127.0.0.1:5001/s3cret' })
-  const listed = String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)
+  const listed = String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)
   expect(listed).toContain('a1 Saved a1 [gpt-6.1-sol/high, full-access, approvals ask] interrupted')
   expect(listed).not.toContain('elsewhere')
   expect(fake.disk.elsewhere?.status).toBe('running')
   expect(fake.disk.a1?.sessionId).toBe('session-1')
   expect(fake.disk.a1?.turnEndedAt).toBe(LIST_NOW)
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_result', id: 'a1' } as never)).result)).toContain('previous result')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_result', id: 'a1' } as never)).result)).toContain('previous result')
   expect(await send($, 'helper', 'continue the saved work')).toEqual({ isDelivered: true })
   expect(fake.rpcs.map(rpc => rpc.method)).toEqual(['thread/resume', 'turn/start'])
   expect(fake.rpcs[0]?.params).toMatchObject({ threadId: 'th-a1', model: 'gpt-6.1-sol', sandbox: 'danger-full-access', approvalPolicy: 'on-request' })
@@ -938,12 +982,12 @@ test('restored native jobs with missing records show failed, refuse SendMessage,
   const fake = fakeBridge(on, {}, {}, {}, LIST_NOW)
   await start($, fake)
   // Native agents may be restored after session.start, as after compaction.
-  fake.agentList.push({ id: 'lost', type: 'codex:sol', name: 'helper' })
-  const listed = String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)
+  fake.agentList.push({ id: 'lost', type: 'codex-delegate:sol', name: 'helper' })
+  const listed = String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)
   expect(listed).toContain('lost')
   expect(listed).toContain('] failed')
   expect(fake.disk.lost?.turnEndedAt).toBe(LIST_NOW)
-  const result = String((await $.tool.call({ tool: 'mcp__codex__codex_result', id: 'lost' } as never)).result)
+  const result = String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_result', id: 'lost' } as never)).result)
   expect(result).toContain('No saved Codex thread for agent lost')
   expect(await send($, 'helper', 'continue')).toMatchObject({ isDelivered: false, reason: 'No saved Codex thread for agent lost. Its job record is missing; start a new codex:* agent. Do not retry codex_await.' })
   expect(fake.delivered).toEqual([])
@@ -957,7 +1001,7 @@ test('restored native jobs with missing records show failed, refuse SendMessage,
 
 test('a persisted thread that Codex cannot resume fails before the Claude wrapper is restarted', { timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on, {}, {}, { a1: savedAgent('a1') })
-  fake.agentList.push({ id: 'a1', type: 'codex:sol' })
+  fake.agentList.push({ id: 'a1', type: 'codex-delegate:sol' })
   await start($, fake)
   fake.rpcErrors['thread/resume'] = 'thread not found'
   expect(await send($, 'a1', 'continue')).toMatchObject({ isDelivered: false, reason: 'Codex did not take the message: thread not found' })
@@ -972,9 +1016,9 @@ test('a native agent restored after bridge startup is still listed as interrupte
   const fake = fakeBridge(on, {}, {}, { late: savedAgent('late') })
   await start($, fake)
   // Wait for startup before the engine restores its native agent rows.
-  await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)
-  fake.agentList.push({ id: 'late', type: 'codex:sol' })
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)).toContain('] interrupted')
+  await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)
+  fake.agentList.push({ id: 'late', type: 'codex-delegate:sol' })
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)).toContain('] interrupted')
   expect(await send($, 'late', 'continue')).toEqual({ isDelivered: true })
   expect(fake.rpcs.map(rpc => rpc.method)).toEqual(['thread/resume', 'turn/start'])
   done(fake)
@@ -982,7 +1026,7 @@ test('a native agent restored after bridge startup is still listed as interrupte
 
 test('a lazy bridge start migrates legacy records even when session.start did not fire', { timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on, { agents: { a1: savedAgent('a1') } })
-  fake.agentList.push({ id: 'a1', type: 'codex:sol' })
+  fake.agentList.push({ id: 'a1', type: 'codex-delegate:sol' })
   push(fake, { type: 'ready', socket: '/tmp/cxb-test/s', reattached: false, active: {} })
   expect(await send($, 'a1', 'continue')).toEqual({ isDelivered: true })
   expect(fake.disk.a1?.threadId).toBe('th-a1')
@@ -1045,38 +1089,38 @@ test("codex rows are one header and one result line; the result text stays the m
   const row = (tool: string, input: Record<string, unknown>, output: unknown, flags: Record<string, boolean> = {}) => ({
     component: 'ToolUse' as const,
     requestId: `tu-${tool}`,
-    props: { tool_use_id: `tu-${tool}`, tool: `mcp__codex__${tool}`, input, isRunning: false, isErrored: false, isInterrupted: false, output, ...flags },
+    props: { tool_use_id: `tu-${tool}`, tool: `mcp__codex-delegate__${tool}`, input, isRunning: false, isErrored: false, isInterrupted: false, output, ...flags },
   })
   for (const surface of ['terminal', 'desktop'] as const) {
-    const running = await $.ui.mount({ plugin: 'codex', surface, ...row('codex_await', {}, undefined, { isRunning: true }) })
+    const running = await $.ui.mount({ plugin: 'codex-delegate', surface, ...row('codex_await', {}, undefined, { isRunning: true }) })
     expect(linesOf((await running.drawn()) as Node)).toBe('● Codex(await)')
     await running.unmount()
 
     // The result block under the row draws nothing.
     const result = await $.ui.mount({
-      plugin: 'codex',
+      plugin: 'codex-delegate',
       surface,
       component: 'ToolResult',
       requestId: 'tu-codex_list',
-      props: { tool_use_id: 'tu-codex_list', tool: 'mcp__codex__codex_list', output: 'x', isErrored: false },
+      props: { tool_use_id: 'tu-codex_list', tool: 'mcp__codex-delegate__codex_list', output: 'x', isErrored: false },
     })
     expect(linesOf((await result.drawn()) as Node)).toBe('')
     await result.unmount()
 
     const cases: [string, Record<string, unknown>, string, string][] = [
-      ['codex_list', {}, 'abc w1 [gpt-6-luna/low, workspace-write, approvals auto] running 3s: thinking\ndef w2 [gpt-6-luna/low, workspace-write, approvals auto] idle, ran 9s, finished 2m ago: completed', 'Codex(list)\n  ⎿  2 agents · 1 running'],
+      ['codex_list', {}, 'abc w1 [gpt-6-luna/low, workspace-write, approvals ask] running 3s: thinking\ndef w2 [gpt-6-luna/low, workspace-write, approvals auto] idle, ran 9s, finished 2m ago: completed', 'Codex(list)\n  ⎿  2 agents · 1 running'],
       ['codex_result', { id: 'w1' }, 'abc w1 [gpt-6-luna/low, workspace-write, approvals auto] idle, ran 9s, finished 2m ago: completed\nFinal message:\nDONE BANANA\nmore', 'Codex(result w1)\n  ⎿  done · DONE BANANA'],
       ['codex_await', {}, 'DONE BANANA\nmore', 'Codex(await)\n  ⎿  done · DONE BANANA'],
       ['codex_await', {}, 'Codex is still running: a1 luna [...] running', 'Codex(await)\n  ⎿  still running'],
     ]
     for (const [tool, input, output, expected] of cases) {
-      const ui = await $.ui.mount({ plugin: 'codex', surface, ...row(tool, input, output) })
+      const ui = await $.ui.mount({ plugin: 'codex-delegate', surface, ...row(tool, input, output) })
       expect(linesOf((await ui.drawn()) as Node)).toBe(`● ${expected}`)
       await ui.unmount()
     }
 
     // An errored call: a red dot and the reason's first line.
-    const failed = await $.ui.mount({ plugin: 'codex', surface, ...row('codex_result', { id: 'nope' }, 'No Codex agent "nope". codex_list shows them.', { isErrored: true }) })
+    const failed = await $.ui.mount({ plugin: 'codex-delegate', surface, ...row('codex_result', { id: 'nope' }, 'No Codex agent "nope". codex_list shows them.', { isErrored: true }) })
     expect(linesOf((await failed.drawn()) as Node)).toBe('● Codex(result nope)\n  ⎿  failed: No Codex agent "nope". codex_list shows them.')
     expect(dotColor((await failed.drawn()) as Node)).toBe('error')
     await failed.unmount()
@@ -1087,12 +1131,12 @@ test("codex rows are one header and one result line; the result text stays the m
 test('codex_list and codex_result read the jobs', { timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on)
   await start($, fake)
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)).toContain('subagent_type codex:luna')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)).toContain('subagent_type codex-delegate:implementer')
   await spawn($, fake)
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)).toMatch(/^a1 Sleep a while \[gpt-6-luna\/max, workspace-write, approvals auto\] running/)
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)).toMatch(/^a1 Sleep a while \[gpt-6-luna\/max, workspace-write, approvals ask\] running/)
   push(fake, note('turn/completed', { threadId: 'th-1', turn: { id: 'turn-1', status: 'completed', items: [{ type: 'agentMessage', text: 'ALL GREEN', phase: 'final_answer' }] } }))
   await until(fake, async () => (await agentsOf(fake)).a1?.status === 'idle', 'idle')
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_result', id: 'Sleep a while' } as never)).result)).toContain('Final message:\nALL GREEN')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_result', id: 'Sleep a while' } as never)).result)).toContain('Final message:\nALL GREEN')
   done(fake)
 })
 
@@ -1107,8 +1151,8 @@ test('a model-capacity error is a warning: the job runs on to its real end', { t
   push(fake, note('item/started', { threadId: 'th-1', turnId: 'turn-1', item: { type: 'commandExecution', command: 'blender -b' } }))
   await until(fake, async () => (await agentsOf(fake)).a1?.warning === CAPACITY, 'the warning')
   expect((await agentsOf(fake)).a1).toMatchObject({ status: 'running', error: null })
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)).toContain(`running 0s, 0 tok: $ blender -b (warning: ${CAPACITY})`)
-  expect((await step($, 'a1')).chunks[0]).toMatchObject({ kind: 'tool', name: 'mcp__codex__codex_await' })
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)).toContain(`running 0s, 0 tok: $ blender -b (warning: ${CAPACITY})`)
+  expect((await step($, 'a1')).chunks[0]).toMatchObject({ kind: 'tool', name: 'mcp__codex-delegate__codex_await' })
   push(fake, finished('DONE'))
   await until(fake, async () => (await agentsOf(fake)).a1?.status === 'idle', 'idle')
   expect(await finalOf($, 'a1', 1)).toBe('DONE')
@@ -1248,21 +1292,21 @@ test('codex_list all=true shows the full session history, newest first; hidden j
   }
   for (let i = 1; i <= 12; i += 1) agents[`j${i}`] = listAgent(`j${i}`, { name: `job ${i}`, startedAt: i, turnEndedAt: 2 })
   const fake = fakeBridge(on, { agents }, {}, {}, LIST_NOW)
-  fake.agentList.push({ id: 'j1', type: 'codex:sol', name: 'job 1' })
+  fake.agentList.push({ id: 'j1', type: 'codex-delegate:sol', name: 'job 1' })
   await start($, fake, { reattached: true })
-  const defaultList = String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)
+  const defaultList = String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)
   expect(defaultList).toBe(`No active or recently finished Codex jobs in this session; 12 ${HIDDEN_NOTICE}`)
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_list', all: false } as never)).result)).toBe(defaultList)
-  const listed = String((await $.tool.call({ tool: 'mcp__codex__codex_list', all: true } as never)).result).split('\n')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list', all: false } as never)).result)).toBe(defaultList)
+  const listed = String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list', all: true } as never)).result).split('\n')
   expect(listed).toHaveLength(12)
   expect(listed[0]).toMatch(/^j12 job 12 \[gpt-6.1-sol\/high, full-access, approvals ask\] idle, ran 0s, finished 1h 0m ago, 123 tok: completed$/)
   expect(listed[9]).toMatch(/^j3 job 3 /)
   expect(listed[11]).toMatch(/^j1 job 1 /)
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_result', id: 'j1' } as never)).result)).toContain('Final message:\nOLD RESULT')
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_result', id: 'other' } as never)).result)).toContain('Final message:\nOLD RESULT')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_result', id: 'j1' } as never)).result)).toContain('Final message:\nOLD RESULT')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_result', id: 'other' } as never)).result)).toContain('Final message:\nOLD RESULT')
   expect(await send($, 'job 1', 'continue the hidden job')).toEqual({ isDelivered: true })
   expect(fake.rpcs.map(rpc => rpc.method)).toEqual(['thread/resume', 'turn/start'])
-  expect(String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)).toContain('j1 job 1 [gpt-6.1-sol/high, full-access, approvals ask] running')
+  expect(String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)).toContain('j1 job 1 [gpt-6.1-sol/high, full-access, approvals ask] running')
   done(fake)
 })
 
@@ -1271,7 +1315,7 @@ test('running agents show beside the prompt hint, and nothing once none runs', {
   on('ui.render', { component: 'PromptHint' }, (_$, e) => ({ type: 'Text', children: [`${e.props.hint}|${e.props.tail ?? ''}`] }))
   await start($, fake)
   const hint = { component: 'PromptHint' as const, requestId: 'hint', props: { isDraft: false, isWorking: false, hint: '? for shortcuts' } }
-  const ui = await $.ui.mount({ plugin: 'codex', surface: 'terminal', ...hint })
+  const ui = await $.ui.mount({ plugin: 'codex-delegate', surface: 'terminal', ...hint })
   expect(linesOf((await ui.drawn()) as Node)).toBe('? for shortcuts|')
   await spawn($, fake)
   await ui.redraw()
@@ -1347,14 +1391,14 @@ test('the Codex CLI version: older than the minimum is refused with the found an
   expect(codexVersionError('codex (dev build)')).toBeUndefined()
 })
 
-test('an outdated Codex CLI refuses each codex:* spawn before any thread starts; codex_list still reads jobs and warns', { timeoutMs: 20_000 }, async ($, on) => {
+test('an outdated Codex CLI refuses each codex-delegate:* spawn before any thread starts; codex_list still reads jobs and warns', { timeoutMs: 20_000 }, async ($, on) => {
   const fake = fakeBridge(on)
   await start($, fake, { codexVersion: 'codex-cli 0.150.3' })
   const refused = await $.agent.spawn(spawnInput('sleep 20'))
   expect(refused.deny).toBe(`codex: the Codex CLI is 0.150.3, older than ${MIN_CODEX_VERSION}, the oldest this plugin runs on. ${UPDATE_HINT}`)
   expect(fake.spawned).toEqual([])
   expect(fake.rpcs).toEqual([])
-  const listed = String((await $.tool.call({ tool: 'mcp__codex__codex_list' } as never)).result)
+  const listed = String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_list' } as never)).result)
   expect(listed).toContain('Warning: the Codex CLI is 0.150.3')
   done(fake)
 })
@@ -1364,5 +1408,157 @@ test('a current Codex CLI version lets the spawn run', { timeoutMs: 20_000 }, as
   await start($, fake, { codexVersion: 'codex-cli 0.162.0-alpha.2' })
   await spawn($, fake)
   expect(fake.rpcs.map(rpc => rpc.method)).toContain('turn/start')
+  done(fake)
+})
+
+test('role types spawn with their preset; the ceiling and maxConcurrentJobs refuse', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  await start($, fake)
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:reviewer' })
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:implementer' })
+  const started = fake.rpcs.filter(rpc => rpc.method === 'thread/start').map(rpc => rpc.params)
+  expect(started[0]).toMatchObject({ model: 'gpt-6.1-sol', sandbox: 'read-only', approvalPolicy: 'never' })
+  expect(started[1]).toMatchObject({ model: 'gpt-6.1-sol', sandbox: 'workspace-write', approvalPolicy: 'never' })
+  // A header can lower a role, not raise it past the ceiling.
+  const before = fake.spawned.length
+  const raised = await $.agent.spawn(spawnInput('sandbox: full-access\nx', { subagentType: 'codex-delegate:rescuer' }))
+  expect(raised.deny).toContain('codex: sandbox full-access is above the maxSandbox')
+  const yolo = await $.agent.spawn(spawnInput('approvals: yolo\nx'))
+  expect(yolo.deny).toContain('approvals yolo is not allowed')
+  expect(fake.spawned).toHaveLength(before)
+  // A header can lower a role; with three jobs live, a fourth is refused.
+  await spawn($, fake, 'sandbox: read-only\nx', { subagentType: 'codex-delegate:implementer' })
+  const full = await $.agent.spawn(spawnInput('x'))
+  expect(full.deny).toContain('maxConcurrentJobs setting allows 3')
+  expect(fake.spawned).toHaveLength(before + 1)
+  done(fake)
+})
+
+const turnText = (fake: Fake, index: number) => JSON.stringify(fake.rpcs.filter(rpc => rpc.method === 'turn/start')[index]?.params.input)
+
+const FULL_RESULT = '## Result\nStatus: done\nFiles changed: none\nCommands run: ls\nOpen questions: none'
+
+test('a role job gets the preamble and a .handoff dir; a raw model type gets neither the preamble', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  await start($, fake)
+  await spawn($, fake, 'do the thing', { subagentType: 'codex-delegate:implementer' })
+  await spawn($, fake, 'do the thing', { subagentType: 'codex-delegate:reviewer' })
+  await spawn($, fake, 'do the thing')
+  const impl = turnText(fake, 0)
+  expect(impl).toContain('Never push')
+  expect(impl).toContain('You may commit')
+  expect(impl).toContain('/work/app/.handoff/a1.md')
+  expect(impl).toContain('Status, Files changed, Commands run, Open questions')
+  expect(impl).toContain('do the thing')
+  expect(turnText(fake, 1)).toContain('Do not commit')
+  expect(turnText(fake, 2)).not.toContain('Never push')
+  expect(fake.handoffs.filter(h => h.path === '/handoff/init')).toHaveLength(3)
+  done(fake)
+})
+
+for (const [name, length, spills] of [['at spillChars', 4000, false], ['one over spillChars', 4001, true]] as const) {
+  test(`spill ${name}`, { timeoutMs: 20_000 }, async ($, on) => {
+    const fake = fakeBridge(on)
+    await start($, fake)
+    await spawn($, fake)
+    const text = 'x'.repeat(length)
+    fake.waitQueue = [completed('turn-1', text)]
+    const answer = String((await awaitCall($, 'a1')).result)
+    const spill = fake.handoffs.filter(h => h.path === '/handoff/spill')
+    if (!spills) {
+      expect(answer).toBe(text)
+      expect(spill).toHaveLength(0)
+      return done(fake)
+    }
+    expect(spill).toHaveLength(1)
+    expect(spill[0]?.body).toMatchObject({ cwd: '/work/app', job: 'a1', text })
+    expect(answer.startsWith('x'.repeat(1500))).toBe(true)
+    expect(answer).not.toContain('x'.repeat(1501))
+    expect(answer).toContain('/work/app/.handoff/a1.spill.md')
+    done(fake)
+  })
+}
+
+test('a 30k message is spilled whole, before the 20k clip', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  await start($, fake)
+  await spawn($, fake)
+  fake.waitQueue = [completed('turn-1', 'y'.repeat(30_000))]
+  await awaitCall($, 'a1')
+  expect((fake.handoffs.find(h => h.path === '/handoff/spill')?.body.text as string).length).toBe(30_000)
+  const result = String((await $.tool.call({ tool: 'mcp__codex-delegate__codex_result', id: 'a1' } as never)).result)
+  expect(result).toContain('a1.spill.md')
+  done(fake)
+})
+
+test('a role job whose result lacks a field gets a warning; a complete one does not', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  await start($, fake)
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:implementer' })
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:reviewer' })
+  fake.waitQueue = [completed('turn-1', '## Result\nStatus: done\nFiles changed: none')]
+  expect(String((await awaitCall($, 'a1')).result)).toContain('Warning: the result lacks the required fields Commands run, Open questions.')
+  fake.waitQueue = [completed('turn-2', FULL_RESULT)]
+  expect(String((await awaitCall($, 'a2')).result)).toBe(FULL_RESULT)
+  done(fake)
+})
+
+const HEAD_A = 'a'.repeat(40)
+const HEAD_B = 'b'.repeat(40)
+
+test('worktree guard: a second writer in the same cwd is refused; other cwd and read-only are not', { options: { maxConcurrentJobs: 10 }, timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  await start($, fake)
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:implementer', cwd: '/work/a' })
+  const refused = await $.agent.spawn(spawnInput('x', { subagentType: 'codex-delegate:rescuer', cwd: '/work/a' }))
+  expect(refused.deny).toContain('already a writing job in /work/a')
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:reviewer', cwd: '/work/a' })
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:implementer', cwd: '/work/b' })
+  done(fake)
+})
+
+for (const [name, linked, refused] of [['the main checkout', false, true], ['a linked worktree', true, false], ['a non-git cwd', undefined, true]] as const) {
+  test(`requireWorktree on: a writing job in ${name} is ${refused ? 'refused' : 'allowed'}; read-only never`, { options: { requireWorktree: true, maxConcurrentJobs: 10 }, timeoutMs: 20_000 }, async ($, on) => {
+    const fake = fakeBridge(on)
+    if (linked !== undefined) fake.git['/work/a'] = { head: HEAD_A, linked }
+    await start($, fake)
+    const result = await $.agent.spawn(spawnInput('x', { subagentType: 'codex-delegate:implementer', cwd: '/work/a' }))
+    if (refused) expect(result.deny).toContain('requireWorktree')
+    else expect(result.deny).toBeUndefined()
+    await spawn($, fake, 'x', { subagentType: 'codex-delegate:reviewer', cwd: '/work/a' })
+    done(fake)
+  })
+}
+
+const AUDIT_CASES = [
+  ['reviewer that moved HEAD', 'codex-delegate:reviewer', [{ sha: HEAD_B, message: 'tidy' }], 'may not commit'],
+  ['Co-Authored-By trailer', 'codex-delegate:implementer', [{ sha: HEAD_B, message: 'x\n\nco-authored-by: Someone <s@x.y>' }], `commit ${'b'.repeat(7)} has a Co-Authored-By`],
+  ['a clean commit by a commit-allowed role', 'codex-delegate:implementer', [{ sha: HEAD_B, message: 'tidy' }], null],
+  ['a raw model type with a clean commit', 'codex-delegate:luna', [{ sha: HEAD_B, message: 'tidy' }], null],
+] as const
+
+for (const [name, type, commits, expected] of AUDIT_CASES) {
+  test(`commit audit: ${name}`, { timeoutMs: 20_000 }, async ($, on) => {
+    const fake = fakeBridge(on)
+    fake.git['/work/app'] = { head: HEAD_A, linked: true }
+    await start($, fake)
+    await spawn($, fake, 'x', { subagentType: type })
+    fake.git['/work/app'] = { head: HEAD_B, linked: true }
+    fake.commits = [...commits]
+    fake.waitQueue = [completed('turn-1', FULL_RESULT)]
+    const answer = String((await awaitCall($, 'a1')).result)
+    if (expected === null) expect(answer).toBe(FULL_RESULT)
+    else expect(answer).toContain(expected)
+    done(fake)
+  })
+}
+
+test('commit audit: silent for a non-git cwd', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  await start($, fake)
+  await spawn($, fake, 'x', { subagentType: 'codex-delegate:reviewer' })
+  fake.commits = [{ sha: HEAD_B, message: 'co-authored-by: x' }]
+  fake.waitQueue = [completed('turn-1', FULL_RESULT)]
+  expect(String((await awaitCall($, 'a1')).result)).toBe(FULL_RESULT)
   done(fake)
 })

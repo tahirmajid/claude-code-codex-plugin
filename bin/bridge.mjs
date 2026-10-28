@@ -159,6 +159,51 @@ const readBody = req =>
     req.on('error', reject)
   })
 
+/** Runs git in cwd; the trimmed stdout, or null when git fails (not a repo, no commits, no git). */
+function git(cwd, args) {
+  const ran = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
+  return ran.status === 0 ? ran.stdout.trim() : null
+}
+
+/** HEAD of cwd's repo (null when not git or no commits), and whether cwd is a linked worktree rather than the main checkout. */
+function gitHead(cwd) {
+  const dir = git(cwd, ['rev-parse', '--git-dir'])
+  const common = git(cwd, ['rev-parse', '--git-common-dir'])
+  const linked = dir !== null && common !== null && path.resolve(cwd, dir) !== path.resolve(cwd, common)
+  return { head: git(cwd, ['rev-parse', 'HEAD']), linked }
+}
+
+/** Commits in `since..HEAD` (oldest first) as { sha, message }; [] when not git or since is unknown. */
+function gitCommits(cwd, since) {
+  const out = git(cwd, ['log', '--reverse', '--format=%H%x1f%B%x1e', `${since}..HEAD`])
+  if (!out) return []
+  return out.split('\x1e').map(chunk => chunk.trim()).filter(Boolean).map(chunk => {
+    const [sha, message] = chunk.split('\x1f')
+    return { sha, message: message ?? '' }
+  })
+}
+
+/**
+ * Creates `<cwd>/.handoff` and, in a git worktree, adds `.handoff/` to that worktree's own
+ * exclude file (never a .gitignore), once. `git rev-parse --git-path` resolves it for linked worktrees.
+ */
+function handoffDir(cwd) {
+  const dir = path.join(cwd, '.handoff')
+  fs.mkdirSync(dir, { recursive: true })
+  const git = spawnSync('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd, encoding: 'utf8', windowsHide: true })
+  if (git.status !== 0 || !git.stdout.trim()) return dir
+  const exclude = path.resolve(cwd, git.stdout.trim())
+  let text = ''
+  try {
+    text = fs.readFileSync(exclude, 'utf8')
+  } catch {}
+  if (!text.split('\n').some(line => line.trim() === '.handoff/')) {
+    fs.mkdirSync(path.dirname(exclude), { recursive: true })
+    fs.appendFileSync(exclude, `${text === '' || text.endsWith('\n') ? '' : '\n'}.handoff/\n`)
+  }
+  return dir
+}
+
 const sendJson = (res, status, value) => {
   const body = JSON.stringify(value)
   res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
@@ -420,6 +465,23 @@ async function daemon(codexPath, dir) {
           for (const done of set) done(MAIL)
         }
         return sendJson(res, 200, { ok: true })
+      }
+      if (url.pathname === '/handoff/init' || url.pathname === '/handoff/spill') {
+        if (typeof body.cwd !== 'string' || !path.isAbsolute(body.cwd)) return sendJson(res, 400, { error: { message: 'an absolute cwd is required' } })
+        const dir = handoffDir(body.cwd)
+        if (url.pathname === '/handoff/init') return sendJson(res, 200, { ok: true, dir })
+        if (typeof body.job !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(body.job) || typeof body.text !== 'string') {
+          return sendJson(res, 400, { error: { message: 'job and text are required' } })
+        }
+        const file = path.join(dir, `${body.job}.spill.md`)
+        fs.writeFileSync(file, body.text)
+        return sendJson(res, 200, { ok: true, path: file })
+      }
+      if (url.pathname === '/git/head' || url.pathname === '/git/commits') {
+        if (typeof body.cwd !== 'string' || !path.isAbsolute(body.cwd)) return sendJson(res, 400, { error: { message: 'an absolute cwd is required' } })
+        if (url.pathname === '/git/head') return sendJson(res, 200, gitHead(body.cwd))
+        if (typeof body.since !== 'string' || !/^[0-9a-f]{7,64}$/i.test(body.since)) return sendJson(res, 400, { error: { message: 'since must be a commit sha' } })
+        return sendJson(res, 200, { commits: gitCommits(body.cwd, body.since) })
       }
       return sendJson(res, 404, { error: { message: 'not found' } })
     } catch (error) {

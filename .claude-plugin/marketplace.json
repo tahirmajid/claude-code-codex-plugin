@@ -1,6 +1,6 @@
 {
-  "name": "codex-plugin",
-  "description": "Run OpenAI Codex agents from Claude Code like background subagents.",
-  "owner": { "name": "SSS135" },
-  "plugins": [{ "name": "codex", "source": "./" }]
+  "name": "tahirmajid",
+  "description": "Codex delegation plugin for Claude Code: roles, guardrails and handoff docs.",
+  "owner": { "name": "Tahir Majid" },
+  "plugins": [{ "name": "codex-delegate", "source": "./" }]
 }

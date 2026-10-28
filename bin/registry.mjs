@@ -8,7 +8,7 @@ import http from 'node:http'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
 
-export const registryDir = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'plugins', 'codex-agents')
+export const registryDir = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'plugins', 'codex-delegate-agents')
 
 const validId = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,200}$/.test(id)
 const strings = value => Array.isArray(value) && value.every(item => typeof item === 'string')
