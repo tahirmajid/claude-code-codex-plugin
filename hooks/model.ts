@@ -410,10 +410,17 @@ export function itemCompleted(agent: CodexAgent, item: Item): Partial<CodexAgent
   return {}
 }
 
+/** Codex's `codexErrorInfo`: a plain string, or an object whose one key names the variant (`{ httpConnectionFailed: {...} }`). */
+export const codexErrorCode = (info: unknown): string | undefined =>
+  typeof info === 'string' && info !== '' ? info
+    : info && typeof info === 'object' ? Object.keys(info)[0] : undefined
+
 /** The agent after its turn ended, from turn/completed's `turn`. */
 export function afterTurn(agent: CodexAgent, turn: Record<string, unknown>, now: number): Partial<CodexAgent> {
   const status = String(turn.status ?? 'completed')
-  const error = (turn.error as { message?: string } | null)?.message ?? null
+  const turnError = turn.error as { message?: string; codexErrorInfo?: unknown } | null
+  const error = turnError?.message ?? null
+  const errorCode = codexErrorCode(turnError?.codexErrorInfo)
   const final = finalMessage((turn.items as Item[] | undefined) ?? [])
   return {
     status: status === 'completed' ? 'idle' : status === 'interrupted' ? 'interrupted' : 'failed',
@@ -421,6 +428,7 @@ export function afterTurn(agent: CodexAgent, turn: Record<string, unknown>, now:
     lastTurnId: String(turn.id ?? agent.currentTurnId ?? ''),
     lastTurnStatus: status,
     error: error ?? (status === 'failed' ? 'the turn failed' : null),
+    errorCode,
     activity: status,
     turnEndedAt: now,
     ...(final !== null ? { lastMessage: final } : {}),
@@ -708,7 +716,7 @@ export const roleDefaults = (defaults: Defaults, role: Role | undefined): Defaul
 export const RESULT_FIELDS = ['Status', 'Files changed', 'Commands run', 'Open questions'] as const
 
 /** `.handoff/<job>.md` under the job's cwd: the brief Claude writes, and where the job writes its `## Result`. */
-export const handoffPath = (cwd: string, job: string): string => `${cwd.replace(/\/$/, '')}/.handoff/${job}.md`
+export const handoffPath = (cwd: string, job: string, brief?: string): string => `${cwd.replace(/\/$/, '')}/${brief ?? `.handoff/${job}.md`}`
 
 /** The text prepended to a role job's prompt (not to a raw model type's). */
 export const rolePreamble = (role: Role, path: string): string => [
@@ -810,13 +818,13 @@ export const agentSpecs = (defaults: Defaults): AgentSpec[] =>
     omitClaudeMd: true,
   }))
 
-const HEADER_KEYS = ['effort', 'sandbox', 'approvals'] as const
+const HEADER_KEYS = ['effort', 'sandbox', 'approvals', 'brief'] as const
 type HeaderKey = (typeof HEADER_KEYS)[number]
 export type PromptHeader = Partial<Record<HeaderKey, string>> & { body: string }
 
-const HEADER_LINE = /^[ \t]*(effort|sandbox|approvals)[ \t]*:[ \t]*(\S+)[ \t]*$/i
+const HEADER_LINE = /^[ \t]*(effort|sandbox|approvals|brief)[ \t]*:[ \t]*(\S+)[ \t]*$/i
 
-/** Reads the `effort:`, `sandbox:` and `approvals:` lines at the top of a prompt; `body` is the rest, as given. */
+/** Reads the `effort:`, `sandbox:`, `approvals:` and `brief:` lines at the top of a prompt (`brief:` is a path relative to the cwd, kept as given); `body` is the rest, as given. */
 export function parseHeader(prompt: string): PromptHeader {
   const lines = prompt.split('\n')
   const header: PromptHeader = { body: prompt }
@@ -826,7 +834,11 @@ export function parseHeader(prompt: string): PromptHeader {
     if (!match) break
     const key = (match[1] as string).toLowerCase() as HeaderKey
     if (header[key] !== undefined) throw new CodexError(`the prompt's header sets ${key} twice`)
-    header[key] = (match[2] as string).toLowerCase()
+    const value = match[2] as string
+    if (key === 'brief' && (value.startsWith('/') || value.split(/[\\/]/).includes('..'))) {
+      throw new CodexError(`the prompt's brief: must be a path relative to the job's cwd, without ..; got ${value}`)
+    }
+    header[key] = key === 'brief' ? value : value.toLowerCase()
     count += 1
   }
   if (count > 0) header.body = lines.slice(count).join('\n').replace(/^(?:[ \t]*\n)+/, '')
@@ -835,8 +847,9 @@ export function parseHeader(prompt: string): PromptHeader {
 
 /** The wrapper's final answer once the Codex turn ended: on success the Codex final message, verbatim. */
 export function wrapperAnswer(agent: CodexAgent): string {
-  if (agent.status === 'failed') return `Codex failed: ${agent.error ?? 'the turn failed'}`
-  if (agent.status === 'interrupted') return agent.error ? `Codex turn interrupted: ${agent.error}` : 'Codex turn interrupted.'
+  const code = agent.errorCode ? ` (${agent.errorCode})` : ''
+  if (agent.status === 'failed') return `Codex failed${code}: ${agent.error ?? 'the turn failed'}`
+  if (agent.status === 'interrupted') return agent.error ? `Codex turn interrupted${code}: ${agent.error}` : 'Codex turn interrupted.'
   return agent.lastMessage || '(Codex finished without a final message.)'
 }
 
@@ -865,7 +878,7 @@ export function listText(agents: readonly CodexAgent[], sessionId: string, now: 
 
 export function resultText(agent: CodexAgent, full: boolean, now: number): string {
   const lines = [describeAgent(agent, now)]
-  if (agent.error) lines.push(`Error: ${agent.error}`)
+  if (agent.error) lines.push(`Error${agent.errorCode ? ` (${agent.errorCode})` : ''}: ${agent.error}`)
   if (full && agent.digest.length > 0) lines.push('Turn digest:', ...agent.digest.map(line => `  ${line}`))
   lines.push(agent.lastMessage ? `Final message:\n${agent.lastMessage}` : 'No final message yet.')
   return lines.join('\n')

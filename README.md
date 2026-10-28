@@ -55,8 +55,9 @@ Optional lines at the very top of the prompt, one `key: value` each, set how Cod
 | `effort:` | low, medium, high, xhigh, max, ultra (luna does not take ultra) | the model's own (luna max, the others high), unless `defaultEffort` or the project sets one |
 | `sandbox:` | read-only, workspace-write, full-access | `defaultSandbox` |
 | `approvals:` | auto, ask, never, yolo | `defaultApprovals` |
+| `brief:` | a path relative to the job's cwd (no leading `/`, no `..`) | `.handoff/<agent id>.md` |
 
-An effort the model does not take, an unknown sandbox or approvals value, a key given twice, or a prompt with nothing after its header refuses the Agent call before any agent starts. `approvals: yolo` means no sandbox and no approvals; Claude is told to use it only when you asked for it explicitly in the request.
+`brief:` names the brief file a role job is told to read (and write its `## Result` into); the plugin neither creates nor requires it, so the spawner can write it before the spawn. An absolute path or one containing `..` refuses the Agent call. An effort the model does not take, an unknown sandbox or approvals value, a key given twice, or a prompt with nothing after its header refuses the Agent call before any agent starts. `approvals: yolo` means no sandbox and no approvals; Claude is told to use it only when you asked for it explicitly in the request.
 
 ### Messages from Codex
 
@@ -93,7 +94,7 @@ Precedence for sandbox, approvals and effort: prompt header line, then role pres
 
 ## Handoff docs, spill and results
 
-- Claude can write a brief to `.handoff/<job>.md` in the job's cwd (see `templates/handoff.md`). A role job is told to read it first and, when it may write, to put its `## Result` there. `.handoff/` is excluded from git through the worktree's own `info/exclude`; `.gitignore` is never touched.
+- Claude can write a brief to `.handoff/<job>.md` in the job's cwd (see `templates/handoff.md`). With the `brief:` header the path is the one it names. A role job is told to read it first and, when it may write, to put its `## Result` there. `.handoff/` is excluded from git through the worktree's own `info/exclude`; `.gitignore` is never touched.
 - Spill: a final message longer than `spillChars` (default 4000) is written in full to `.handoff/<job>.spill.md`; the answer carries its first 1,500 characters and the path.
 - Result: a role job's `## Result` has four fixed fields: Status, Files changed, Commands run (with output tails), Open questions. The check is warn-only: the final message must hold a `## Result` heading and, inside that section (up to the next `#` or `##` heading), a field line for each label (`Status:`, `**Status:**`, `- Status:` or a `### Status` heading); a label mentioned in prose elsewhere does not count. The answer gets a warning when the heading is missing or naming each missing field. Nothing is refused.
 - Worktree guard: with `requireWorktree` on, a writing spawn in the main checkout (or a non-git directory) is refused. Independently, a writing spawn is refused while another live writing job has the same cwd.

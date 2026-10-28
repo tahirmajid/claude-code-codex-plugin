@@ -543,6 +543,7 @@ function startTurn($: Engine, agent: CodexAgent, text: string): Promise<CodexAge
       // turn/started may already have landed with the same id
       currentTurnId: started.turn.id,
       error: null,
+      errorCode: undefined,
       warning: null,
       activity: current.currentTurnId === started.turn.id ? current.activity : 'thinking',
       turnStartedAt: now,
@@ -762,6 +763,7 @@ async function onNotification($: Engine, method: string, params: Record<string, 
       status: 'running', currentTurnId: turnId,
       warning: `Codex kept working after its turn was reported ${current.lastTurnStatus ?? current.status}${current.error ? `: ${current.error}` : ''}`,
       error: null,
+      errorCode: undefined,
     })
   }
   switch (method) {
@@ -978,11 +980,13 @@ export const register: Register = (on, options) => {
     if (alias === undefined) return next(e)
     let input: JobInput
     let body: string
+    let brief: string | undefined
     let role: ReturnType<typeof roleOfType>
     let threadId: string
     try {
       const header = parseHeader(e.prompt)
       body = header.body
+      brief = header.brief
       if (body.trim() === '') return { deny: 'codex: the prompt is empty once its header lines are taken off' }
       role = roleOfType(e.subagentType)
       const defaults = roleDefaults(effectiveDefaults(settings, await projectConfig($)), role)
@@ -1039,7 +1043,7 @@ export const register: Register = (on, options) => {
       }
       const agent = await putAgent($, await newAgent($, spawned.agentId, threadId, input))
       try {
-        await startTurn($, agent, role ? rolePreamble(role, handoffPath(agent.cwd, agent.id)) + body : body)
+        await startTurn($, agent, role ? rolePreamble(role, handoffPath(agent.cwd, agent.id, brief)) + body : body)
       } catch (error) {
         // The subagent runs: it ends at once with this reason as its answer.
         const now = await $.clock.now()

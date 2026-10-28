@@ -2,7 +2,7 @@ import type { On, SessionMessage, TurnStepChunk, TurnStepResult } from 'claude-c
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 
-import { resultWarning, agentDescription, agentSpecs, aliasOf, aliasOfType, approvalAnswer, approvalOptions, bridgeTarget, codexVersionError, configDirs, describeAgent, effectiveDefaults, effortFor, listText, MIN_CODEX_VERSION, modelEffortError, modelFor, nodeOptionPreloads, parseHeader, permissionsFor, resultText, roleDefaults, roleOfType, shortCommand, TOOL_SPECS, UPDATE_HINT, withoutPreloads, wrapperAnswer } from '../hooks/model'
+import { resultWarning, agentDescription, agentSpecs, aliasOf, aliasOfType, approvalAnswer, approvalOptions, bridgeTarget, codexVersionError, configDirs, describeAgent, effectiveDefaults, effortFor, listText, MIN_CODEX_VERSION, modelEffortError, modelFor, afterTurn, codexErrorCode, handoffPath, nodeOptionPreloads, parseHeader, rolePreamble, permissionsFor, resultText, roleDefaults, roleOfType, shortCommand, TOOL_SPECS, UPDATE_HINT, withoutPreloads, wrapperAnswer } from '../hooks/model'
 import type { CodexAgent, CodexApprovals } from '../types'
 
 // A fake bridge: the relay's stdout is a queue the test pushes NDJSON into,
@@ -1574,4 +1574,30 @@ test('commit audit: silent for a non-git cwd', { timeoutMs: 20_000 }, async ($, 
   fake.waitQueue = [completed('turn-1', FULL_RESULT)]
   expect(String((await awaitCall($, 'a1')).result)).toBe(FULL_RESULT)
   done(fake)
+})
+
+test('the Codex error code reaches the failure text, codex_result and is absent without one', () => {
+  const agent = { status: 'running', currentTurnId: 't', digest: [] } as unknown as CodexAgent
+  const withCode = { ...agent, ...afterTurn(agent, { id: 't', status: 'failed', error: { message: 'limit hit', codexErrorInfo: 'usageLimitExceeded' } }, 1) } as CodexAgent
+  expect(withCode.errorCode).toBe('usageLimitExceeded')
+  expect(wrapperAnswer(withCode)).toBe('Codex failed (usageLimitExceeded): limit hit')
+  expect(resultText({ ...withCode, tokens: 0, lastMessage: '' } as CodexAgent, false, 2)).toContain('Error (usageLimitExceeded): limit hit')
+  const variant = afterTurn(agent, { id: 't', status: 'failed', error: { message: 'm', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } } }, 1)
+  expect(variant.errorCode).toBe('httpConnectionFailed')
+  const without = { ...agent, ...afterTurn(agent, { id: 't', status: 'failed', error: { message: 'boom', codexErrorInfo: null } }, 1) } as CodexAgent
+  expect(without.errorCode).toBeUndefined()
+  expect(wrapperAnswer(without)).toBe('Codex failed: boom')
+  expect(codexErrorCode(undefined)).toBeUndefined()
+})
+
+test('the brief: header names the brief file; the default path is unchanged', () => {
+  expect(parseHeader('brief: docs/b.md\neffort: low\nGo')).toEqual({ brief: 'docs/b.md', effort: 'low', body: 'Go' })
+  expect(parseHeader('brief: Docs/B.md\nGo').brief).toBe('Docs/B.md')
+  expect(() => parseHeader('brief: /etc/b.md\nGo')).toThrow('relative')
+  expect(() => parseHeader('brief: ../b.md\nGo')).toThrow('relative')
+  expect(() => parseHeader('brief: a/../../b.md\nGo')).toThrow('relative')
+  expect(handoffPath('/w/', 'j1')).toBe('/w/.handoff/j1.md')
+  expect(handoffPath('/w', 'j1', 'notes/b.md')).toBe('/w/notes/b.md')
+  const role = { sandbox: 'workspace-write', commit: false } as never
+  expect(rolePreamble(role, handoffPath('/w', 'j1', 'notes/b.md'))).toContain('/w/notes/b.md')
 })

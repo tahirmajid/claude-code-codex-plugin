@@ -26,11 +26,11 @@ Codex jobs run as background subagents (`codex-delegate:<type>`). Codex sees not
 Raw model types (`sol`, `luna`, `astra`, `terra`) get no preamble and no role preset: `sol` for general judgement work, `luna` for cheap mechanical work, `astra` and `terra` only when the user asks for them.
 
 - One writer per worktree: a second writing job in the same cwd is refused. Create the worktree (`git worktree add`) before spawning and pass it as the cwd. Read-only jobs may share a cwd.
-- Optional header lines at the top of the prompt (stripped before Codex sees it): `effort:`, `sandbox:`, `approvals:`.
+- Optional header lines at the top of the prompt (stripped before Codex sees it): `effort:`, `sandbox:`, `approvals:`, `brief: <path relative to the cwd>` (names the brief file; no absolute path, no `..`).
 
 ## 3. Write the brief
 
-1. `mkdir -p <worktree>/.handoff && cp <plugin>/templates/handoff.md <worktree>/.handoff/<job>.md`
+1. Pick a name you control, e.g. `.handoff/<job>.md`: `mkdir -p <worktree>/.handoff && cp <plugin>/templates/handoff.md <worktree>/.handoff/<job>.md`
 2. Fill it in:
    - Goal: one or two sentences, what is true when done.
    - Scope: files, directories or modules it may touch.
@@ -38,7 +38,7 @@ Raw model types (`sol`, `luna`, `astra`, `terra`) get no preamble and no role pr
    - Acceptance: concrete commands to run or behaviour to observe.
    - Out of scope: what to leave alone even if it looks related.
    - Leave `## Result` for the job.
-3. Keep the spawn prompt short: name the job and say "the brief is at `<worktree>/.handoff/<job>.md`". A role job is already told to read that path (`.handoff/<agent id>.md`), so name the file after the agent id when you can, or state the exact path in the prompt.
+3. Start the spawn prompt with the header line `brief: .handoff/<job>.md` (relative to the cwd), then a short task. A role job is told to read that path and, when it may write, to put its `## Result` there. Without the header the path is `.handoff/<agent id>.md`, which you cannot know before the spawn; the plugin never creates or requires the file.
 4. `.handoff/` is git-excluded in the worktree; do not commit it.
 
 ## 4. Read results
@@ -66,14 +66,14 @@ Raw model types (`sol`, `luna`, `astra`, `terra`) get no preamble and no role pr
 
 What the code does (verified by reading `hooks/` and `bin/bridge.mjs`):
 
-- A turn that ends failed is recorded with status `failed` and `error` set to the turn's error message (or `the turn failed`). The answer to the spawn then reads `Codex failed: <error>`; `codex_result` shows `Error: <error>`.
+- A turn that ends failed is recorded with status `failed`, `error` set to the turn's error message (or `the turn failed`) and `errorCode` set to Codex's `codexErrorInfo` (its string, or the variant name of an object such as `httpConnectionFailed`) when Codex gave one. The answer to the spawn then reads `Codex failed (<errorCode>): <error>`, without the parentheses when there is no code; `codex_result` shows `Error (<errorCode>): <error>` likewise.
 - The bridge drops the `account/rateLimits/updated` notification, so no limit warning is shown ahead of time.
 - The bridge holds a failed turn for 30 s and drops it if Codex keeps working, so a brief "at capacity" style failure may fix itself.
 - A job that never started ends `failed` with `the Codex turn did not start: <reason>`; a lost turn reads `the Codex turn was lost`; a dead app-server reads `codex app-server exited`.
 
 What the Codex app-server protocol says (from `codex app-server generate-ts`): a failed turn carries `error.message` and a `codexErrorInfo` with values including `usageLimitExceeded`, `rateLimitExceeded`, `serverOverloaded` and `unauthorized`.
 
-What I could not verify: the plugin keeps only `error.message` and discards `codexErrorInfo`, so the code string never reaches you, and the exact message wording for a usage limit is not documented locally. Do not rely on a specific string. Match loosely, case-insensitively, on `limit`, `quota`, `rate`, `capacity`, `usage`, and treat any other `failed` status as a possible Codex-side problem too.
+Matching: check the code in parentheses first. `usageLimitExceeded` or `rateLimitExceeded` means out of limit (fallback below); `serverOverloaded` is transient (one retry); `unauthorized` means login expired. Only when there is no code, match the message loosely and case-insensitively on `limit`, `quota`, `rate`, `capacity`, `usage`; the exact message wording for a usage limit is not documented locally, so never rely on a specific string. Treat any other `failed` status as a possible Codex-side problem too. Not verified: whether Codex always sets a code on a limit failure.
 
 Fallback procedure:
 

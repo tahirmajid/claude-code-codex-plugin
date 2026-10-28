@@ -10,6 +10,8 @@ Fork note: this is the first release of the codex-delegate fork of SSS135/claude
 - Default `defaultApprovals` to `ask`; `yolo` needs `allowedApprovals` and `maxSandbox` full-access.
 - Add `maxConcurrentJobs` (default 3).
 - Add `.handoff/<job>.md` briefs (git-excluded via the worktree's `info/exclude`), spill of long final messages to `.handoff/<job>.spill.md`, and a warn-only check for the four `## Result` fields.
+- Keep Codex's `codexErrorInfo` as the agent's `errorCode`: `Codex failed (usageLimitExceeded): <message>` in the spawn answer and `Error (<code>): <message>` in `codex_result`; unchanged when Codex gave none.
+- Add the `brief: <relative path>` spawn header line to name the brief file before the agent id is known; absolute or `..` paths are refused.
 - Add the `requireWorktree` guard and a commit audit (HEAD moved for a no-commit role, `Co-Authored-By` trailers).
 - Add the `delegate-to-codex` usage skill (when to delegate, role choice, briefs, results, refusals, out-of-limit fallback).
 - Fix agent-type and alias lookup through `Object.prototype` names by using `Object.hasOwn`.

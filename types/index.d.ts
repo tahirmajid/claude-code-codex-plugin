@@ -33,6 +33,8 @@ export type CodexAgent = {
   activity: string
   tokens: number
   error: string | null
+  /** Codex's `codexErrorInfo` for the failed turn (e.g. usageLimitExceeded, rateLimitExceeded); absent when Codex gave none. */
+  errorCode?: string
   /** The latest non-terminal Codex error (a retry, a failed compaction, work after a reported end); the job runs on. */
   warning?: string | null
   /** The key bin/codex-msg names this job by (in the thread's developer instructions). */
