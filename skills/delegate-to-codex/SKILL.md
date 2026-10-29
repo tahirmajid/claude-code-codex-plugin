@@ -16,12 +16,12 @@ Codex jobs run as background subagents (`codex-delegate:<type>`). Codex sees not
 
 ## 2. Which type
 
-| Type | Sandbox | Approvals | Model | Commits | Use when |
-|---|---|---|---|---|---|
-| `implementer` | workspace-write | never | sol | yes | the change is decided: implement, build, test, commit |
-| `reviewer` | read-only | never | sol | no | review a diff or area; findings only, changes nothing |
-| `runner` | workspace-write | ask | luna | yes | no judgement: run a command and report failures, grep, exact patch, rename |
-| `rescuer` | workspace-write | ask | sol | yes | stuck task or second pass: diagnosis or an alternative implementation |
+| Type | Sandbox | Approvals | Model | Use when |
+|---|---|---|---|---|
+| `implementer` | workspace-write | never | sol | the change is decided: implement, build, test; you commit |
+| `reviewer` | read-only | never | sol | review a diff or area; findings only, changes nothing |
+| `runner` | workspace-write | ask | luna | no judgement: run a command and report failures, grep, exact patch, rename |
+| `rescuer` | workspace-write | ask | sol | stuck task or second pass: diagnosis or an alternative implementation |
 
 Raw model types (`sol`, `luna`, `astra`, `terra`) get no preamble and no role preset: `sol` for general judgement work, `luna` for cheap mechanical work, `astra` and `terra` only when the user asks for them.
 
@@ -47,7 +47,7 @@ Raw model types (`sol`, `luna`, `astra`, `terra`) get no preamble and no role pr
 - A role job ends with a `## Result` section with four field lines: `Status`, `Files changed`, `Commands run` (with output tails), `Open questions`. A writing role also writes it into its `.handoff/<job>.md`.
 - Warn-only check: the answer gets `Warning: the final message has no "## Result" section.` or `... lacks the required field(s) ...`. Nothing is refused; read the job's output yourself and ask for the missing part with SendMessage if it matters.
 - Commit audit warnings (role and raw jobs, only when HEAD moved since spawn):
-  - `this role may not commit, but HEAD moved` - a reviewer made commits; inspect and revert them.
+  - `this role may not commit, but HEAD moved` - a role job committed anyway; inspect the commits and keep or revert them.
   - `commit(s) <sha> ... Co-Authored-By trailer` - amend the message before the work is used.
 - Verify before trusting: check `git log`/`git diff` in the worktree and re-run the acceptance commands. Never push or open a PR on Codex's say-so; jobs are told never to push, and you push only after your own check.
 - `codex_list` shows jobs (running, or finished in the last 30 minutes; `all: true` for more); `codex_result` shows any job's status, error and last message.

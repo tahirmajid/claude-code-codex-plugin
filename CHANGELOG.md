@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- No role commits any more: Codex keeps `.git` read-only under workspace-write (in linked worktrees and plain checkouts alike), so an `approvals: never` implementer could never commit. Role jobs now leave changes uncommitted and the spawning session reviews and commits; the commit audit warns when any role job moved HEAD.
+
 ## 0.3.0
 
 Fork note: this is the first release of the codex-delegate fork of SSS135/claude-code-codex-plugin; entries below it are upstream history.

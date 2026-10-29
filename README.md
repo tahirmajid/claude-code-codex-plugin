@@ -69,14 +69,14 @@ Each job is named after the Agent call's description, numbered when another job 
 
 ## Roles
 
-Four role agent types carry a preset. A role job also gets a short preamble (stay in the worktree, never push, commit or not, read the handoff doc, write a `## Result`); raw model types get none.
+Four role agent types carry a preset. A role job also gets a short preamble (stay in the worktree, never push, never commit since the spawner reviews and commits, read the handoff doc, write a `## Result`); raw model types get none.
 
-| Agent type | Sandbox | Approvals | Model | May commit | Use it for |
-| --- | --- | --- | --- | --- | --- |
-| `codex-delegate:implementer` | workspace-write | never | sol | yes | An already-decided change in one worktree: implement, build, test, commit. |
-| `codex-delegate:reviewer` | read-only | never | sol | no | Read-only review of a diff or code area. |
-| `codex-delegate:runner` | workspace-write | ask | luna | yes | No-judgement legwork: run a command and report failures, grep, an exact patch, a rename. |
-| `codex-delegate:rescuer` | workspace-write | ask | sol | yes | A stuck task or a second pass. |
+| Agent type | Sandbox | Approvals | Model | Use it for |
+| --- | --- | --- | --- | --- |
+| `codex-delegate:implementer` | workspace-write | never | sol | An already-decided change in one worktree: implement, build, test; you commit. |
+| `codex-delegate:reviewer` | read-only | never | sol | Read-only review of a diff or code area. |
+| `codex-delegate:runner` | workspace-write | ask | luna | No-judgement legwork: run a command and report failures, grep, an exact patch, a rename. |
+| `codex-delegate:rescuer` | workspace-write | ask | sol | A stuck task or a second pass. |
 
 Raw model types (`codex-delegate:luna`, `sol`, `astra`, `terra`) have no preset: they use the configured defaults and may be told to do anything the policy allows.
 

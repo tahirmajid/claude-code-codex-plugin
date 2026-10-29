@@ -1446,7 +1446,7 @@ test('a role job gets the preamble and a .handoff dir; a raw model type gets nei
   await spawn($, fake, 'do the thing')
   const impl = turnText(fake, 0)
   expect(impl).toContain('Never push')
-  expect(impl).toContain('You may commit')
+  expect(impl).toContain('Do not commit')
   expect(impl).toContain('/work/app/.handoff/a1.md')
   for (const field of ['- Status:', '- Files changed:', '- Commands run:', '- Open questions:']) expect(impl).toContain(field)
   expect(impl).toContain('do the thing')
@@ -1546,7 +1546,7 @@ for (const [name, linked, refused] of [['the main checkout', false, true], ['a l
 const AUDIT_CASES = [
   ['reviewer that moved HEAD', 'codex-delegate:reviewer', [{ sha: HEAD_B, message: 'tidy' }], 'may not commit'],
   ['Co-Authored-By trailer', 'codex-delegate:implementer', [{ sha: HEAD_B, message: 'x\n\nco-authored-by: Someone <s@x.y>' }], `commit ${'b'.repeat(7)} has a Co-Authored-By`],
-  ['a clean commit by a commit-allowed role', 'codex-delegate:implementer', [{ sha: HEAD_B, message: 'tidy' }], null],
+  ['an implementer that moved HEAD', 'codex-delegate:implementer', [{ sha: HEAD_B, message: 'tidy' }], 'may not commit'],
   ['a raw model type with a clean commit', 'codex-delegate:luna', [{ sha: HEAD_B, message: 'tidy' }], null],
 ] as const
 

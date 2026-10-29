@@ -723,7 +723,7 @@ export const rolePreamble = (role: Role, path: string): string => [
   'Working rules for this job:',
   '- Stay inside this worktree; touch nothing outside it.',
   '- Never push, and never open or merge a pull request.',
-  role.commit ? '- You may commit in this worktree.' : '- Do not commit; leave all changes uncommitted.',
+  '- Do not commit; leave all changes uncommitted (the spawner reviews and commits them).',
   `- If ${path} exists, read it first: it is the brief (goal, scope, constraints, acceptance, out of scope).`,
   `- Finish by writing a "## Result" section${role.sandbox === 'read-only' ? ' in your final message' : ` in ${path} (and your final message)`} as the last section, headed exactly "## Result", with one field line each: ${RESULT_FIELDS.map(f => `"- ${f}:"`).join(', ')} (put the tail of each command's output under Commands run). Mentioning a field in prose elsewhere does not count.`,
   `- Keep the final message to a short summary plus the path ${path}.`,

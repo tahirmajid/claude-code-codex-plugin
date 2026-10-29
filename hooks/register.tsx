@@ -91,7 +91,6 @@ import {
   verdictOf,
   wrapperAnswer,
 } from './model'
-import { ROLES } from './roles'
 
 type Engine = EngineInterface
 
@@ -224,7 +223,7 @@ async function commitAudit($: Engine, agent: CodexAgent): Promise<string> {
     const now = await gitState($, agent.cwd)
     if (!now?.head || now.head === agent.headAtSpawn) return ''
     const listed = (await post($, '/git/commits', { cwd: agent.cwd, since: agent.headAtSpawn })).commits
-    return auditWarnings(agent.role ? ROLES[agent.role]?.commit : undefined, Array.isArray(listed) ? (listed as { sha: string; message: string }[]) : [])
+    return auditWarnings(agent.role ? false : undefined, Array.isArray(listed) ? (listed as { sha: string; message: string }[]) : [])
   } catch (error) {
     $.ui.log(`codex: commit audit of ${agent.name} failed: ${errorText(error)}`, { to: 'debug' })
     return ''
