@@ -68,7 +68,7 @@ type Fake = {
   git: Record<string, { head: string | null; linked: boolean }>
   commits: { sha: string; message: string }[]
   /** What /fs/resolve answers per absolute path (absent: does not exist). */
-  dirs: Record<string, { dir: boolean; common: string | null }>
+  dirs: Record<string, { dir: boolean; common: string | null; top?: string }>
   clock: MockClock
 }
 
@@ -234,7 +234,7 @@ function fakeBridge(on: On, stored: Record<string, unknown> = {}, files: Record<
     if (path === '/git/head') reply = fake.git[String(body.cwd)] ?? { head: null, linked: false }
     if (path === '/fs/resolve') {
       const real = String(body.path).startsWith('/') ? String(body.path) : `${body.base}/${body.path}`
-      reply = fake.dirs[real] ? { real, ...fake.dirs[real] } : { real: null, dir: false, common: null }
+      reply = fake.dirs[real] ? { real, top: null, ...fake.dirs[real] } : { real: null, dir: false, common: null, top: null }
     }
     if (path === '/git/commits') reply = { commits: fake.commits }
     if (path === '/reply') fake.replies.push(body)
@@ -542,6 +542,19 @@ test('the cwd: header picks the project config from the job cwd, not the session
   await start($, fake)
   await spawn($, fake, 'cwd: /work/wt\nx')
   expect(fake.rpcs.find(rpc => rpc.method === 'turn/start')?.params).toMatchObject({ effort: 'low' })
+  done(fake)
+})
+
+test('the cwd: header looks for the project config only up to the job checkout top level', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on, {}, { '/work/.claude/codex.json': JSON.stringify({ effort: 'medium' }), '/work/wt/.claude/codex.json': JSON.stringify({ effort: 'low' }) })
+  fake.dirs['/work/wt/sub'] = { dir: true, common: null, top: '/work/wt' }
+  fake.dirs['/work/plain'] = { dir: true, common: null }
+  await start($, fake)
+  await spawn($, fake, 'cwd: /work/wt/sub\nx')
+  await spawn($, fake, 'cwd: /work/plain\nx')
+  const efforts = fake.rpcs.filter(rpc => rpc.method === 'turn/start').map(rpc => (rpc.params as { effort?: string }).effort)
+  expect(efforts[0]).toBe('low')
+  expect(efforts[1]).not.toBe('medium')
   done(fake)
 })
 

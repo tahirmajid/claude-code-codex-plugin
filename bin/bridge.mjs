@@ -173,7 +173,7 @@ function gitHead(cwd) {
   return { head: git(cwd, ['rev-parse', 'HEAD']), linked }
 }
 
-/** Resolves a job cwd: `~` expanded, relative to `base`, symlinks resolved; `real` is null when it does not exist, `common` is the realpath of its git common dir (null when not a git checkout). */
+/** Resolves a job cwd: `~` expanded, relative to `base`, symlinks resolved; `real` is null when it does not exist, `common` and `top` are the realpaths of its git common dir and top level (null when not a git checkout). */
 function resolveDir(p, base) {
   const home = os.homedir()
   const expanded = p === '~' ? home : /^~[\\/]/.test(p) ? path.join(home, p.slice(2)) : p
@@ -183,16 +183,17 @@ function resolveDir(p, base) {
     real = fs.realpathSync(path.resolve(base, expanded))
     dir = fs.statSync(real).isDirectory()
   } catch {
-    return { real: null, dir: false, common: null }
+    return { real: null, dir: false, common: null, top: null }
   }
-  const out = dir ? git(real, ['rev-parse', '--git-common-dir']) : null
-  let common = null
-  if (out) {
+  const gitPath = args => {
+    const out = dir ? git(real, args) : null
     try {
-      common = fs.realpathSync(path.resolve(real, out))
-    } catch {}
+      return out ? fs.realpathSync(path.resolve(real, out)) : null
+    } catch {
+      return null
+    }
   }
-  return { real, dir, common }
+  return { real, dir, common: gitPath(['rev-parse', '--git-common-dir']), top: gitPath(['rev-parse', '--show-toplevel']) }
 }
 
 /** Commits in `since..HEAD` (oldest first) as { sha, message }; [] when not git or since is unknown. */

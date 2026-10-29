@@ -215,9 +215,10 @@ test('/fs/resolve expands ~ and relative paths, follows symlinks, and reports th
     git(repo, 'worktree', 'add', '-q', linked, '-b', 'other')
     const resolve = (p, b = base) => call(address, 'POST', '/fs/resolve', { path: p, base: b })
     const main = await resolve(repo)
-    assert.deepEqual([main.real, main.dir, main.common], [repo, true, path.join(repo, '.git')])
-    // A linked worktree shares the main checkout's common dir.
+    assert.deepEqual([main.real, main.dir, main.common, main.top], [repo, true, path.join(repo, '.git'), repo])
+    // A linked worktree shares the main checkout's common dir and has its own top level.
     assert.equal((await resolve(linked)).common, main.common)
+    assert.equal((await resolve(linked)).top, fs.realpathSync(linked))
     // Relative to base, and through a symlink.
     assert.equal((await resolve(path.basename(repo))).real, repo)
     fs.symlinkSync(repo, path.join(base, 'link'))
@@ -226,8 +227,8 @@ test('/fs/resolve expands ~ and relative paths, follows symlinks, and reports th
     assert.equal((await resolve('~')).real, fs.realpathSync(os.homedir()))
     // Not a directory, missing, not git.
     fs.writeFileSync(path.join(base, 'f.txt'), 'x')
-    assert.deepEqual(await resolve('f.txt'), { real: fs.realpathSync(path.join(base, 'f.txt')), dir: false, common: null })
-    assert.deepEqual(await resolve('nope'), { real: null, dir: false, common: null })
+    assert.deepEqual(await resolve('f.txt'), { real: fs.realpathSync(path.join(base, 'f.txt')), dir: false, common: null, top: null })
+    assert.deepEqual(await resolve('nope'), { real: null, dir: false, common: null, top: null })
     const plain = fs.mkdtempSync(path.join(base, 'plain-'))
     assert.equal((await resolve(plain)).common, null)
     assert.ok((await resolve('x', 'relative')).error)

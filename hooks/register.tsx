@@ -205,8 +205,8 @@ async function patchSpilling(
   })
 }
 
-/** The job's `cwd:` header resolved by the bridge (`~`, relative to the session's cwd, symlinks); refused when missing, not a directory, or another repository's checkout without allowForeignCwd. */
-async function headerCwd($: Engine, value: string, allowForeign: boolean): Promise<string> {
+/** The job's `cwd:` header resolved by the bridge (`~`, relative to the session's cwd, symlinks), with its git top level (itself when not git) as the config lookup's stop; refused when missing, not a directory, or another repository's checkout without allowForeignCwd. */
+async function headerCwd($: Engine, value: string, allowForeign: boolean): Promise<{ dir: string; top: string }> {
   const base = await $.session.cwd()
   const job = await post($, '/fs/resolve', { path: value, base })
   if (typeof job.real !== 'string') throw new CodexError(`the prompt's cwd: ${value} does not exist`)
@@ -217,7 +217,7 @@ async function headerCwd($: Engine, value: string, allowForeign: boolean): Promi
       throw new CodexError(`the prompt's cwd: ${job.real} is a checkout of a different repository than this session's; the allowForeignCwd setting allows it`)
     }
   }
-  return job.real
+  return { dir: job.real, top: typeof job.top === 'string' ? job.top : job.real }
 }
 
 /** HEAD and linked-worktree state of cwd from the bridge; null when the bridge cannot tell. */
@@ -924,9 +924,9 @@ async function onEvent($: Engine, event: BridgeEvent): Promise<void> {
 
 // ------------------------------------------------------------ the module
 
-/** The nearest .claude/codex.json from `cwd` (the session's by default) up to the project root. */
-async function projectConfig($: Engine, cwd?: string): Promise<Partial<Defaults>> {
-  for (const dir of configDirs(cwd ?? (await $.session.cwd()), await $.session.root())) {
+/** The nearest .claude/codex.json from `from.dir` up to `from.top` (by default the session's cwd up to the project root). */
+async function projectConfig($: Engine, from?: { dir: string; top: string }): Promise<Partial<Defaults>> {
+  for (const dir of configDirs(from?.dir ?? (await $.session.cwd()), from?.top ?? (await $.session.root()))) {
     const path = `${dir === '/' ? '' : dir}/${PROJECT_CONFIG}`
     if (await $.fs.exists(path)) return parseProjectConfig(await $.fs.read(path), path)
   }
@@ -1019,7 +1019,7 @@ export const register: Register = (on, options) => {
       const { sandbox, approvals } = permissionsFor(header, defaults, settings, role)
       const error = modelEffortError(listed, model, effort)
       if (error) return { deny: `codex: ${error}` }
-      const cwd = headerDir ?? e.cwd ?? (await $.session.cwd())
+      const cwd = headerDir?.dir ?? e.cwd ?? (await $.session.cwd())
       const git = await gitState($, cwd)
       // Read-only jobs are never refused by the worktree rules.
       if (sandbox !== 'read-only') {
