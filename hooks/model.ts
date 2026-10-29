@@ -24,6 +24,8 @@ export type Settings = {
   spillChars: number
   /** Refuse a writing job whose cwd is the main checkout rather than a linked git worktree. */
   requireWorktree: boolean
+  /** Allow a `cwd:` header to name a checkout of a different repository than the session's. */
+  allowForeignCwd: boolean
 }
 
 export type BridgeEvent =
@@ -792,7 +794,8 @@ export function agentDescription(name: string, defaults: Defaults): string {
     `"effort: ${effortsOf(alias)}";`,
     `"sandbox: read-only|workspace-write|full-access" (OS-enforced; workspace-write writes only in the cwd plus the temp directory; default ${defaults.sandbox});`,
     `"approvals: auto|ask|never|yolo" (default ${defaults.approvals}; auto: Codex's own reviewer decides escalations, looser than Claude's auto mode; ask: the user approves each; never: the sandbox alone decides; yolo: no sandbox and no approvals, ONLY when the user explicitly asked for it).`,
-    `Project defaults: ${PROJECT_CONFIG}.`,
+    `"cwd: <path>" (the directory the job runs in instead of the session's; absolute or relative to the session's cwd, "~" allowed, double-quote a path with spaces; a checkout of another repository is refused unless the allowForeignCwd setting is on).`,
+    `Project defaults: ${PROJECT_CONFIG}, read from the job's cwd.`,
     'Codex may message you mid-task as this agent. SendMessage to it steers the running Codex turn, or starts a new turn on the same thread once it finished; TaskStop interrupts it.',
   ].join(' ')
 }
@@ -818,13 +821,13 @@ export const agentSpecs = (defaults: Defaults): AgentSpec[] =>
     omitClaudeMd: true,
   }))
 
-const HEADER_KEYS = ['effort', 'sandbox', 'approvals', 'brief'] as const
+const HEADER_KEYS = ['effort', 'sandbox', 'approvals', 'brief', 'cwd'] as const
 type HeaderKey = (typeof HEADER_KEYS)[number]
 export type PromptHeader = Partial<Record<HeaderKey, string>> & { body: string }
 
-const HEADER_LINE = /^[ \t]*(effort|sandbox|approvals|brief)[ \t]*:[ \t]*(\S+)[ \t]*$/i
+const HEADER_LINE = /^[ \t]*(effort|sandbox|approvals|brief|cwd)[ \t]*:[ \t]*(.*?)[ \t]*$/i
 
-/** Reads the `effort:`, `sandbox:`, `approvals:` and `brief:` lines at the top of a prompt (`brief:` is a path relative to the cwd, kept as given); `body` is the rest, as given. */
+/** Reads the `effort:`, `sandbox:`, `approvals:`, `brief:` and `cwd:` lines at the top of a prompt (`brief:` is a path relative to the job's cwd, kept as given; `cwd:` is a path, double quotes optional, kept as given); `body` is the rest, as given. */
 export function parseHeader(prompt: string): PromptHeader {
   const lines = prompt.split('\n')
   const header: PromptHeader = { body: prompt }
@@ -833,8 +836,19 @@ export function parseHeader(prompt: string): PromptHeader {
     const match = HEADER_LINE.exec(line)
     if (!match) break
     const key = (match[1] as string).toLowerCase() as HeaderKey
+    let value = match[2] as string
+    // Only cwd takes a quoted value with spaces; any other key needs one bare word, else the line is the body.
+    if (key !== 'cwd' && !/^\S+$/.test(value)) break
     if (header[key] !== undefined) throw new CodexError(`the prompt's header sets ${key} twice`)
-    const value = match[2] as string
+    if (key === 'cwd') {
+      const quoted = /^"([^"]*)"$/.exec(value)
+      if (!quoted && /\s/.test(value)) throw new CodexError(`the prompt's cwd: has spaces; wrap the path in double quotes; got ${value}`)
+      value = quoted ? (quoted[1] as string) : value
+      if (value.trim() === '') throw new CodexError("the prompt's cwd: is empty")
+      header.cwd = value
+      count += 1
+      continue
+    }
     if (key === 'brief' && (value.startsWith('/') || value.split(/[\\/]/).includes('..'))) {
       throw new CodexError(`the prompt's brief: must be a path relative to the job's cwd, without ..; got ${value}`)
     }

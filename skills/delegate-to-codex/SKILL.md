@@ -25,8 +25,8 @@ Codex jobs run as background subagents (`codex-delegate:<type>`). Codex sees not
 
 Raw model types (`sol`, `luna`, `astra`, `terra`) get no preamble and no role preset: `sol` for general judgement work, `luna` for cheap mechanical work, `astra` and `terra` only when the user asks for them.
 
-- One writer per worktree: a second writing job in the same cwd is refused. Create the worktree (`git worktree add`) before spawning and pass it as the cwd. Read-only jobs may share a cwd.
-- Optional header lines at the top of the prompt (stripped before Codex sees it): `effort:`, `sandbox:`, `approvals:`, `brief: <path relative to the cwd>` (names the brief file; no absolute path, no `..`).
+- One writer per worktree: a second writing job in the same cwd is refused. Create the worktree (`git worktree add`) before spawning and pass it as the cwd, or from a session in another directory give it as the `cwd: <path>` header (double-quote a path with spaces). Read-only jobs may share a cwd.
+- Optional header lines at the top of the prompt (stripped before Codex sees it): `effort:`, `sandbox:`, `approvals:`, `cwd: <absolute path, or relative to the session's cwd>` (run the job there; a checkout of another repository is refused unless `allowForeignCwd` is on), `brief: <path relative to the job's cwd>` (names the brief file; no absolute path, no `..`).
 
 ## 3. Write the brief
 
@@ -58,8 +58,8 @@ Raw model types (`sol`, `luna`, `astra`, `terra`) get no preamble and no role pr
 - A header can only tighten a role: `sandbox:` above the role's preset or `approvals:` looser than it is refused. Drop the header or use a raw type.
 - `yolo` needs `allowedApprovals` to list it and `maxSandbox` full-access, and only when the user explicitly asked.
 - Concurrency cap: `maxConcurrentJobs` (default 3) jobs already running; wait for one or stop it.
-- Same-cwd writer: another live writing job has that cwd; give this job its own worktree.
-- `requireWorktree`: a writing job whose cwd is the main checkout (or not git) is refused; create a linked worktree.
+- Same-cwd writer: another live writing job has that cwd; give this job its own worktree, or set `cwd:`.
+- `requireWorktree`: a writing job whose cwd is the main checkout (or not git) is refused; create a linked worktree, or set `cwd:` to one.
 - Outdated Codex CLI or an unknown model/effort is also refused with its reason in the message.
 
 ## 6. Codex out of limit or unavailable

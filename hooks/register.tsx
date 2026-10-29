@@ -205,6 +205,21 @@ async function patchSpilling(
   })
 }
 
+/** The job's `cwd:` header resolved by the bridge (`~`, relative to the session's cwd, symlinks); refused when missing, not a directory, or another repository's checkout without allowForeignCwd. */
+async function headerCwd($: Engine, value: string, allowForeign: boolean): Promise<string> {
+  const base = await $.session.cwd()
+  const job = await post($, '/fs/resolve', { path: value, base })
+  if (typeof job.real !== 'string') throw new CodexError(`the prompt's cwd: ${value} does not exist`)
+  if (job.dir !== true) throw new CodexError(`the prompt's cwd: ${job.real} is not a directory`)
+  if (!allowForeign && typeof job.common === 'string') {
+    const session = await post($, '/fs/resolve', { path: base, base })
+    if (job.common !== session.common) {
+      throw new CodexError(`the prompt's cwd: ${job.real} is a checkout of a different repository than this session's; the allowForeignCwd setting allows it`)
+    }
+  }
+  return job.real
+}
+
 /** HEAD and linked-worktree state of cwd from the bridge; null when the bridge cannot tell. */
 async function gitState($: Engine, cwd: string): Promise<{ head: string | null; linked: boolean } | null> {
   try {
@@ -909,9 +924,9 @@ async function onEvent($: Engine, event: BridgeEvent): Promise<void> {
 
 // ------------------------------------------------------------ the module
 
-/** The nearest .claude/codex.json from the session's cwd up to the project root. */
-async function projectConfig($: Engine): Promise<Partial<Defaults>> {
-  for (const dir of configDirs(await $.session.cwd(), await $.session.root())) {
+/** The nearest .claude/codex.json from `cwd` (the session's by default) up to the project root. */
+async function projectConfig($: Engine, cwd?: string): Promise<Partial<Defaults>> {
+  for (const dir of configDirs(cwd ?? (await $.session.cwd()), await $.session.root())) {
     const path = `${dir === '/' ? '' : dir}/${PROJECT_CONFIG}`
     if (await $.fs.exists(path)) return parseProjectConfig(await $.fs.read(path), path)
   }
@@ -951,6 +966,7 @@ export const register: Register = (on, options) => {
     maxConcurrentJobs: Number(options.maxConcurrentJobs),
     spillChars: Number(options.spillChars),
     requireWorktree: options.requireWorktree === true || options.requireWorktree === 'true',
+    allowForeignCwd: options.allowForeignCwd === true || options.allowForeignCwd === 'true',
   }
   bridgeSettings = settings
 
@@ -988,12 +1004,13 @@ export const register: Register = (on, options) => {
       brief = header.brief
       if (body.trim() === '') return { deny: 'codex: the prompt is empty once its header lines are taken off' }
       role = roleOfType(e.subagentType)
-      const defaults = roleDefaults(effectiveDefaults(settings, await projectConfig($)), role)
       const sessionId = await $.session.id()
       const live = Object.values(await read($, agentsAtom)).filter(agent => agent.sessionId === sessionId && isLive(agent)).length + spawnsInFlight
       if (live >= settings.maxConcurrentJobs) return { deny: `codex: ${live} Codex jobs are already running; the maxConcurrentJobs setting allows ${settings.maxConcurrentJobs}` }
       // A bridge that is down starts here again, or the refusal says why it did not; its relay has read `codex --version`.
       await bridgeSocket($)
+      const headerDir = header.cwd === undefined ? undefined : await headerCwd($, header.cwd, settings.allowForeignCwd)
+      const defaults = roleDefaults(effectiveDefaults(settings, await projectConfig($, headerDir)), role)
       const outdated = codexVersionError(codexVersion)
       if (outdated) return { deny: `codex: ${outdated}` }
       const listed = await listModels($)
@@ -1002,7 +1019,7 @@ export const register: Register = (on, options) => {
       const { sandbox, approvals } = permissionsFor(header, defaults, settings, role)
       const error = modelEffortError(listed, model, effort)
       if (error) return { deny: `codex: ${error}` }
-      const cwd = e.cwd ?? (await $.session.cwd())
+      const cwd = headerDir ?? e.cwd ?? (await $.session.cwd())
       const git = await gitState($, cwd)
       // Read-only jobs are never refused by the worktree rules.
       if (sandbox !== 'read-only') {

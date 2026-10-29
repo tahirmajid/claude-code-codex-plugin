@@ -67,6 +67,8 @@ type Fake = {
   /** What /git/head answers per cwd (absent: not git), and what /git/commits lists. */
   git: Record<string, { head: string | null; linked: boolean }>
   commits: { sha: string; message: string }[]
+  /** What /fs/resolve answers per absolute path (absent: does not exist). */
+  dirs: Record<string, { dir: boolean; common: string | null }>
   clock: MockClock
 }
 
@@ -113,6 +115,7 @@ function fakeBridge(on: On, stored: Record<string, unknown> = {}, files: Record<
       ['gpt-6.1-sol', [...EFFORTS, 'ultra']],
     ],
     git: {},
+    dirs: {},
     commits: [],
     clock: mock.clock(on, { now }),
   }
@@ -229,6 +232,10 @@ function fakeBridge(on: On, stored: Record<string, unknown> = {}, files: Record<
       if (path === '/handoff/spill') reply = { ok: true, path: `${body.cwd}/.handoff/${body.job}.spill.md` }
     }
     if (path === '/git/head') reply = fake.git[String(body.cwd)] ?? { head: null, linked: false }
+    if (path === '/fs/resolve') {
+      const real = String(body.path).startsWith('/') ? String(body.path) : `${body.base}/${body.path}`
+      reply = fake.dirs[real] ? { real, ...fake.dirs[real] } : { real: null, dir: false, common: null }
+    }
     if (path === '/git/commits') reply = { commits: fake.commits }
     if (path === '/reply') fake.replies.push(body)
     if (path === '/wait') {
@@ -441,6 +448,101 @@ test('parseHeader reads only the leading key lines and keeps the rest as given',
   expect(parseHeader('  effort:  HIGH \n\n\n  indented body\n')).toEqual({ effort: 'high', body: '  indented body\n' })
   expect(parseHeader('approvals: never\nsandbox: workspace-write\nbody')).toEqual({ approvals: 'never', sandbox: 'workspace-write', body: 'body' })
   expect(() => parseHeader('sandbox: a\nsandbox: b\nx')).toThrow('twice')
+})
+
+test('parseHeader cwd: absolute, relative, ~, quoted with spaces; duplicate, empty and unquoted spaces are errors', () => {
+  expect(parseHeader('cwd: /w/a\nbody')).toEqual({ cwd: '/w/a', body: 'body' })
+  expect(parseHeader('cwd: ../wt-b\nbody')).toEqual({ cwd: '../wt-b', body: 'body' })
+  expect(parseHeader('CWD: ~/Code/Wt\neffort: low\nbody')).toEqual({ cwd: '~/Code/Wt', effort: 'low', body: 'body' })
+  expect(parseHeader('cwd: "/path/with space/wt"\nbody')).toEqual({ cwd: '/path/with space/wt', body: 'body' })
+  expect(() => parseHeader('cwd: /a\ncwd: /b\nx')).toThrow('cwd twice')
+  expect(() => parseHeader('cwd:\nx')).toThrow('empty')
+  expect(() => parseHeader('cwd: ""\nx')).toThrow('empty')
+  expect(() => parseHeader('cwd: /path/with space\nx')).toThrow('double quotes')
+  // Other keys still need one bare word.
+  expect(parseHeader('effort: low high\nx')).toEqual({ body: 'effort: low high\nx' })
+})
+
+test('cwd: header wins over the spawn cwd and the session cwd, and is where the job runs and its brief lives', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  fake.dirs['/work/wt'] = { dir: true, common: null }
+  fake.dirs['/work/app/wt'] = { dir: true, common: null }
+  await start($, fake)
+  const none = await spawn($, fake, 'x', { subagentType: 'codex-delegate:implementer' })
+  const header = await spawn($, fake, 'cwd: /work/wt\nbrief: notes/b.md\ndo it', { subagentType: 'codex-delegate:implementer', cwd: '/other' })
+  const relative = await spawn($, fake, 'cwd: wt\ndo it', { subagentType: 'codex-delegate:reviewer', cwd: '/other' })
+  expect(none.cwd).toBe('/work/app')
+  expect(header.cwd).toBe('/work/wt')
+  expect(relative.cwd).toBe('/work/app/wt')
+  expect(turnText(fake, 1)).toContain('/work/wt/notes/b.md')
+  expect(turnText(fake, 1)).not.toContain('cwd:')
+  expect(fake.rpcs.filter(rpc => rpc.method === 'turn/start')[1]?.params).toMatchObject({ cwd: '/work/wt' })
+  expect(fake.handoffs.find(h => h.body.cwd === '/work/wt')?.path).toBe('/handoff/init')
+  done(fake)
+})
+
+test('cwd: header refusals: missing path, a file, a foreign repository (until allowForeignCwd), a non-git session', { options: { maxConcurrentJobs: 10 }, timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  fake.dirs['/work/app'] = { dir: true, common: '/work/app/.git' }
+  fake.dirs['/work/wt'] = { dir: true, common: '/work/app/.git' }
+  fake.dirs['/work/file'] = { dir: false, common: null }
+  fake.dirs['/elsewhere/repo'] = { dir: true, common: '/elsewhere/repo/.git' }
+  fake.dirs['/elsewhere/plain'] = { dir: true, common: null }
+  await start($, fake)
+  const refusal = async (cwd: string) => (await $.agent.spawn(spawnInput(`cwd: ${cwd}\nx`, { subagentType: 'codex-delegate:reviewer' }))).deny
+  expect(await refusal('/nope')).toContain('does not exist')
+  expect(await refusal('/work/file')).toContain('not a directory')
+  expect(await refusal('/elsewhere/repo')).toContain('allowForeignCwd')
+  // Read-only jobs are checked too; a non-git directory and a worktree of the session's repository pass.
+  expect(await refusal('/elsewhere/plain')).toBeUndefined()
+  expect(await refusal('/work/wt')).toBeUndefined()
+  // A session outside any repository treats a git cwd as foreign.
+  delete fake.dirs['/work/app']
+  expect(await refusal('/work/wt')).toContain('allowForeignCwd')
+  done(fake)
+})
+
+test('cwd: header in another repository is allowed with allowForeignCwd', { options: { allowForeignCwd: true }, timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  fake.dirs['/work/app'] = { dir: true, common: '/work/app/.git' }
+  fake.dirs['/elsewhere/repo'] = { dir: true, common: '/elsewhere/repo/.git' }
+  await start($, fake)
+  expect((await spawn($, fake, 'cwd: /elsewhere/repo\nx')).cwd).toBe('/elsewhere/repo')
+  done(fake)
+})
+
+test('cwd: header and requireWorktree: the main checkout is refused, a linked worktree allowed, read-only never', { options: { requireWorktree: true, maxConcurrentJobs: 10 }, timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  fake.dirs['/work/main'] = { dir: true, common: null }
+  fake.dirs['/work/linked'] = { dir: true, common: null }
+  fake.git['/work/main'] = { head: HEAD_A, linked: false }
+  fake.git['/work/linked'] = { head: HEAD_A, linked: true }
+  await start($, fake)
+  const impl = (cwd: string) => $.agent.spawn(spawnInput(`cwd: ${cwd}\nx`, { subagentType: 'codex-delegate:implementer' }))
+  expect((await impl('/work/main')).deny).toContain('requireWorktree')
+  expect((await impl('/work/linked')).deny).toBeUndefined()
+  expect((await $.agent.spawn(spawnInput('cwd: /work/main\nx', { subagentType: 'codex-delegate:reviewer' }))).deny).toBeUndefined()
+  done(fake)
+})
+
+test('the one-writer check is keyed on the resolved cwd: different cwd: headers both start, the same one is refused', { options: { maxConcurrentJobs: 10 }, timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on)
+  for (const dir of ['/work/a', '/work/b']) fake.dirs[dir] = { dir: true, common: null }
+  await start($, fake)
+  const impl = (cwd: string) => $.agent.spawn(spawnInput(`cwd: ${cwd}\nx`, { subagentType: 'codex-delegate:implementer' }))
+  expect((await impl('/work/a')).deny).toBeUndefined()
+  expect((await impl('/work/b')).deny).toBeUndefined()
+  expect((await impl('/work/a')).deny).toContain('already a writing job in /work/a')
+  done(fake)
+})
+
+test('the cwd: header picks the project config from the job cwd, not the session cwd', { timeoutMs: 20_000 }, async ($, on) => {
+  const fake = fakeBridge(on, {}, { '/work/wt/.claude/codex.json': JSON.stringify({ effort: 'low' }) })
+  fake.dirs['/work/wt'] = { dir: true, common: null }
+  await start($, fake)
+  await spawn($, fake, 'cwd: /work/wt\nx')
+  expect(fake.rpcs.find(rpc => rpc.method === 'turn/start')?.params).toMatchObject({ effort: 'low' })
+  done(fake)
 })
 
 test('the wrapper loop: codex_await while Codex runs, then the Codex final message verbatim, with no Claude model', { timeoutMs: 20_000 }, async ($, on) => {

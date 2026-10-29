@@ -1,6 +1,6 @@
 {
   "name": "codex-delegate",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": {
     "name": "SSS135"
   },
@@ -83,6 +83,12 @@
       "type": "boolean",
       "title": "Require a linked worktree for writing jobs",
       "description": "When on, a spawn that may write is refused if its cwd is the main checkout rather than a linked git worktree (a non-git cwd counts as not a worktree). Read-only jobs are never refused.",
+      "default": false
+    },
+    "allowForeignCwd": {
+      "type": "boolean",
+      "title": "Allow a cwd: header in another repository",
+      "description": "When on, a spawn's cwd: header may name a checkout of a different git repository than the session's (also when the session is not in a git repo). Off by default: such a spawn is refused. A non-git directory is always allowed.",
       "default": false
     },
     "maxConcurrentJobs": {

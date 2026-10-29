@@ -56,8 +56,9 @@ Optional lines at the very top of the prompt, one `key: value` each, set how Cod
 | `sandbox:` | read-only, workspace-write, full-access | `defaultSandbox` |
 | `approvals:` | auto, ask, never, yolo | `defaultApprovals` |
 | `brief:` | a path relative to the job's cwd (no leading `/`, no `..`) | `.handoff/<agent id>.md` |
+| `cwd:` | an absolute path, or one relative to the session's cwd; `~` is expanded; double-quote a path with spaces | the Agent call's `cwd`, else the session's |
 
-`brief:` names the brief file a role job is told to read (and write its `## Result` into); the plugin neither creates nor requires it, so the spawner can write it before the spawn. An absolute path or one containing `..` refuses the Agent call. An effort the model does not take, an unknown sandbox or approvals value, a key given twice, or a prompt with nothing after its header refuses the Agent call before any agent starts. `approvals: yolo` means no sandbox and no approvals; Claude is told to use it only when you asked for it explicitly in the request.
+`brief:` names the brief file a role job is told to read (and write its `## Result` into); the plugin neither creates nor requires it, so the spawner can write it before the spawn. An absolute path or one containing `..` refuses the Agent call. `cwd:` runs the job in that directory instead (the realpath, resolved by the bridge so symlinks cannot escape; `brief:` stays relative to it). Order: `cwd:` header, then the Agent call's `cwd`, then the session's. It must exist and be a directory, and an empty value is an error. A checkout of a different git repository than the session's (compared by `git rev-parse --git-common-dir`; a git checkout from a session outside any repository also counts) is refused unless `allowForeignCwd` is on; a non-git directory is always allowed. The worktree guard and the one-writer check apply to the resolved directory, and the project's `.claude/codex.json` is looked up from it. An effort the model does not take, an unknown sandbox or approvals value, a key given twice, or a prompt with nothing after its header refuses the Agent call before any agent starts. `approvals: yolo` means no sandbox and no approvals; Claude is told to use it only when you asked for it explicitly in the request.
 
 ### Messages from Codex
 
@@ -88,6 +89,7 @@ You, the user, set a ceiling in the plugin settings; nothing a spawn asks for ca
 - `allowedApprovals`: approvals values a spawn may use (`auto`, `ask`, `never`, `yolo`).
 - `maxConcurrentJobs`: spawns are refused while this many jobs of the session run.
 - `requireWorktree`: writing jobs must run in a linked git worktree, not the main checkout.
+- `allowForeignCwd`: let a `cwd:` header name a checkout of another repository (off by default).
 - `spillChars`: see Handoff docs.
 
 Precedence for sandbox, approvals and effort: prompt header line, then role preset, then the project's `.claude/codex.json`, then `userConfig`, then built-in defaults. The ceiling applies to the result either way. Headers and the project file can only tighten a role's preset, never widen it: a header sandbox above the role's, or approvals looser than the role's (`ask` < `auto` < `never` < `yolo`), refuses the spawn; raw model types have no preset. `yolo` (no sandbox, no approvals) needs `allowedApprovals` to include `yolo` and `maxSandbox` to be `full-access`.
@@ -162,11 +164,12 @@ Set these in the install screen or the plugin's config menu (`userConfig`):
 | `allowedApprovals` | `ask,never` | Comma-separated approvals a spawn may run with, from auto, ask, never, yolo. yolo also needs `maxSandbox` full-access. |
 | `spillChars` | `4000` | A final message longer than this spills to `.handoff/<job>.spill.md`. |
 | `requireWorktree` | `false` | Refuse a writing job whose cwd is the main checkout rather than a linked git worktree. Read-only jobs are never refused. |
+| `allowForeignCwd` | `false` | Let a `cwd:` header name a checkout of a different git repository than the session's. A user setting only: a project's `.claude/codex.json` cannot grant it. |
 | `maxConcurrentJobs` | `3` | Refuse a spawn while this many jobs of the session run. |
 
 Both path defaults are macOS paths (Apple Silicon with Homebrew). Elsewhere, either keep them and put `codex` and `node` on PATH, or set absolute paths. An empty path also means PATH. On Windows npm's `codex.cmd` shim cannot run without a shell, so the bridge runs the npm package's `codex.js` with node instead, found beside a configured path or on PATH, or a `codex.exe` found there; `codexPath` may also name a `codex.exe` or `codex.js` directly.
 
-A project can set its own defaults in `.claude/codex.json`. The plugin uses the nearest one found walking up to the project root:
+A project can set its own defaults in `.claude/codex.json`. The plugin uses the nearest one found walking up to the project root, starting from the job's cwd (a `cwd:` header's directory, so a worktree's own file applies; otherwise the session's):
 
 ```json
 { "effort": "medium", "sandbox": "workspace-write", "approvals": "ask" }

@@ -173,6 +173,28 @@ function gitHead(cwd) {
   return { head: git(cwd, ['rev-parse', 'HEAD']), linked }
 }
 
+/** Resolves a job cwd: `~` expanded, relative to `base`, symlinks resolved; `real` is null when it does not exist, `common` is the realpath of its git common dir (null when not a git checkout). */
+function resolveDir(p, base) {
+  const home = os.homedir()
+  const expanded = p === '~' ? home : /^~[\\/]/.test(p) ? path.join(home, p.slice(2)) : p
+  let real = null
+  let dir = false
+  try {
+    real = fs.realpathSync(path.resolve(base, expanded))
+    dir = fs.statSync(real).isDirectory()
+  } catch {
+    return { real: null, dir: false, common: null }
+  }
+  const out = dir ? git(real, ['rev-parse', '--git-common-dir']) : null
+  let common = null
+  if (out) {
+    try {
+      common = fs.realpathSync(path.resolve(real, out))
+    } catch {}
+  }
+  return { real, dir, common }
+}
+
 /** Commits in `since..HEAD` (oldest first) as { sha, message }; [] when not git or since is unknown. */
 function gitCommits(cwd, since) {
   const out = git(cwd, ['log', '--reverse', '--format=%H%x1f%B%x1e', `${since}..HEAD`])
@@ -476,6 +498,12 @@ async function daemon(codexPath, dir) {
         const file = path.join(dir, `${body.job}.spill.md`)
         fs.writeFileSync(file, body.text)
         return sendJson(res, 200, { ok: true, path: file })
+      }
+      if (url.pathname === '/fs/resolve') {
+        if (typeof body.path !== 'string' || body.path === '' || typeof body.base !== 'string' || !path.isAbsolute(body.base)) {
+          return sendJson(res, 400, { error: { message: 'path and an absolute base are required' } })
+        }
+        return sendJson(res, 200, resolveDir(body.path, body.base))
       }
       if (url.pathname === '/git/head' || url.pathname === '/git/commits') {
         if (typeof body.cwd !== 'string' || !path.isAbsolute(body.cwd)) return sendJson(res, 400, { error: { message: 'an absolute cwd is required' } })

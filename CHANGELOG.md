@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Add the `cwd: <path>` spawn header: run a job in another directory (absolute or relative to the session's cwd, `~` expanded, symlinks resolved by the bridge, double quotes for spaces). The job's cwd then drives the git state, one-writer check, `requireWorktree`, `brief:` path, spill, commit audit and the project's `.claude/codex.json` lookup.
+- Refuse a `cwd:` that is missing, not a directory, or a checkout of a different repository than the session's, unless the new `allowForeignCwd` setting (default off) is on.
+- Add the bridge endpoint `/fs/resolve`.
+
 ## 0.3.1
 
 - No role commits any more: Codex keeps `.git` read-only under workspace-write (in linked worktrees and plain checkouts alike), so an `approvals: never` implementer could never commit. Role jobs now leave changes uncommitted and the spawning session reviews and commits; the commit audit warns when any role job moved HEAD.

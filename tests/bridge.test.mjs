@@ -188,3 +188,50 @@ test('/git/head reports HEAD and linked-worktree state; /git/commits lists commi
     daemon.kill()
   }
 })
+
+test('/fs/resolve expands ~ and relative paths, follows symlinks, and reports the git common dir', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-bridge-test-'))
+  const dir = path.join(base, 'd-4')
+  fs.mkdirSync(dir)
+  const fake = path.join(base, 'fake-codex.mjs')
+  fs.writeFileSync(fake, FAKE_CODEX, { mode: 0o755 })
+  const daemon = spawn(process.execPath, [BRIDGE, '--daemon', fake, dir], { stdio: 'ignore', windowsHide: true })
+  try {
+    const file = path.join(dir, 's')
+    let address = ''
+    for (let i = 0; i < 100 && !address; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+      try {
+        const candidate = process.platform === 'win32' ? fs.readFileSync(file, 'utf8') : file
+        if ((await call(candidate, 'GET', '/health')).ok) address = candidate
+      } catch {}
+    }
+    assert.ok(address, 'the daemon did not start')
+    const git = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8', stdio: 'pipe' }).trim()
+    const repo = fs.realpathSync(fs.mkdtempSync(path.join(base, 'repo-')))
+    git(repo, 'init', '-q')
+    git(repo, 'commit', '--allow-empty', '-qm', 'first')
+    const linked = path.join(base, 'linked')
+    git(repo, 'worktree', 'add', '-q', linked, '-b', 'other')
+    const resolve = (p, b = base) => call(address, 'POST', '/fs/resolve', { path: p, base: b })
+    const main = await resolve(repo)
+    assert.deepEqual([main.real, main.dir, main.common], [repo, true, path.join(repo, '.git')])
+    // A linked worktree shares the main checkout's common dir.
+    assert.equal((await resolve(linked)).common, main.common)
+    // Relative to base, and through a symlink.
+    assert.equal((await resolve(path.basename(repo))).real, repo)
+    fs.symlinkSync(repo, path.join(base, 'link'))
+    assert.equal((await resolve('link')).real, repo)
+    // ~ is the home directory.
+    assert.equal((await resolve('~')).real, fs.realpathSync(os.homedir()))
+    // Not a directory, missing, not git.
+    fs.writeFileSync(path.join(base, 'f.txt'), 'x')
+    assert.deepEqual(await resolve('f.txt'), { real: fs.realpathSync(path.join(base, 'f.txt')), dir: false, common: null })
+    assert.deepEqual(await resolve('nope'), { real: null, dir: false, common: null })
+    const plain = fs.mkdtempSync(path.join(base, 'plain-'))
+    assert.equal((await resolve(plain)).common, null)
+    assert.ok((await resolve('x', 'relative')).error)
+  } finally {
+    daemon.kill()
+  }
+})
