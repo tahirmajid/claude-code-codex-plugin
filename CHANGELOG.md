@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Shorter context footprint: each agent type's description lists the header lines in one compact sentence and points to the skill; the delegate-to-codex skill is cut from ~9.4k to ~2.6k characters.
+
 ## 0.4.0
 
 - Add the `cwd: <path>` spawn header: run a job in another directory (absolute or relative to the session's cwd, `~` expanded, symlinks resolved by the bridge, double quotes for spaces). The job's cwd then drives the git state, one-writer check, `requireWorktree`, `brief:` path, spill, commit audit and the project's `.claude/codex.json` lookup.

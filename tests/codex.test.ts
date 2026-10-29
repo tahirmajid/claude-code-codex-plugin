@@ -363,7 +363,7 @@ test('registers one native agent type per model alias, run on haiku with codex_a
   }
   const luna = String(fake.registeredAgents[0]?.description)
   expect(luna).toContain('the newest Luna model, effort medium.')
-  expect(luna).toContain('effort: low|medium|high|xhigh|max"')
+  expect(luna).toContain('effort: low|medium|high|xhigh|max;')
   expect(String(fake.registeredAgents[1]?.description)).toContain('|ultra')
   done(fake)
 })

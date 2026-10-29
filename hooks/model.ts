@@ -789,14 +789,9 @@ export function agentDescription(name: string, defaults: Defaults): string {
   const family = alias.charAt(0).toUpperCase() + alias.slice(1)
   return [
     `${ROLES[name]?.whenToUse ?? WHEN_TO_USE[name]} OpenAI Codex on the newest ${family} model, effort ${effortFor(defaults, alias)}.`,
-    'Codex gets your prompt verbatim, sees nothing of this conversation, and its final message is the result. Always runs in the background.',
-    'Optional header lines at the top of the prompt, stripped before Codex sees it:',
-    `"effort: ${effortsOf(alias)}";`,
-    `"sandbox: read-only|workspace-write|full-access" (OS-enforced; workspace-write writes only in the cwd plus the temp directory; default ${defaults.sandbox});`,
-    `"approvals: auto|ask|never|yolo" (default ${defaults.approvals}; auto: Codex's own reviewer decides escalations, looser than Claude's auto mode; ask: the user approves each; never: the sandbox alone decides; yolo: no sandbox and no approvals, ONLY when the user explicitly asked for it).`,
-    `"cwd: <path>" (the directory the job runs in instead of the session's; absolute or relative to the session's cwd, "~" allowed, double-quote a path with spaces; a checkout of another repository is refused unless the allowForeignCwd setting is on).`,
-    `Project defaults: ${PROJECT_CONFIG}, read from the job's cwd.`,
-    'Codex may message you mid-task as this agent. SendMessage to it steers the running Codex turn, or starts a new turn on the same thread once it finished; TaskStop interrupts it.',
+    'Runs in the background and sees only your prompt.',
+    `Optional header lines first: effort: ${effortsOf(alias)}; sandbox: read-only|workspace-write|full-access (default ${defaults.sandbox}); approvals: auto|ask|never|yolo (default ${defaults.approvals}; yolo only if the user asked); cwd: <path>; brief: <path>.`,
+    'SendMessage steers it, TaskStop stops it. Details: the delegate-to-codex skill.',
   ].join(' ')
 }
 
